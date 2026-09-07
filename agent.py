@@ -1,11 +1,9 @@
 """The submission entrypoint. The platform imports this file and calls get_move."""
 
-import random
-
 import chess
+from src.search import get_best_move
 
 # Import time runs at the game start. 90s to import packages, build tables etc.
-
 
 def get_move(fen: str, time_left_ms: int) -> str:
     """Return a legal move in UCI notation.
@@ -21,6 +19,4 @@ def get_move(fen: str, time_left_ms: int) -> str:
     log only your team can read, after validation and after every rated game.
     """
     board = chess.Board(fen)
-
-    # TODO: Replace everything below this and build a winning bot!
-    return random.choice(list(board.legal_moves)).uci()
+    return get_best_move(board, 3).uci()
