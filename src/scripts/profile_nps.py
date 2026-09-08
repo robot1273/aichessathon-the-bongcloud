@@ -2,7 +2,7 @@ import argparse
 import time
 
 import chess
-from positions import BENCHMARK_POSITIONS
+from .positions import BENCHMARK_POSITIONS
 
 from ..search import Bot
 

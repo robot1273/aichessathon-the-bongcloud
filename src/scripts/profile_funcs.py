@@ -5,7 +5,7 @@ import cProfile
 import pstats
 
 import chess
-from positions import BENCHMARK_POSITIONS
+from .positions import BENCHMARK_POSITIONS
 
 from ..search import Bot
 
