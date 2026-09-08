@@ -34,7 +34,7 @@ def profile_codebase(depth: int, top_n: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Profile engine bottlenecks.")
-    parser.add_argument("--depth", type=int, default=3, help="Search depth limit")
+    parser.add_argument("--depth", type=int, default=4, help="Search depth limit")
     parser.add_argument("--top", type=int, default=20, help="Number of top functions to show")
     args = parser.parse_args()
 

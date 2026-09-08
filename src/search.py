@@ -15,7 +15,7 @@ from .move_ordering import (
 RNG = random.Random(os.environ.get("HARNESS_SEED", "69"))  # Not-so constant RNG constnat
 MATE_SCORE = int(1e6)
 DELTA_PRUNING: Final[int] = 2 * PIECE_VALUES[chess.PAWN]
-
+MAX_QUIECENCE_DEPTH: Final[int] = 16
 
 class Bot:
     def __init__(self) -> None:
@@ -27,10 +27,11 @@ class Bot:
         alpha: float,
         beta: float,
         ply: int,
+        quicience_ply: int
     ) -> float:
         self.nodes_visited += 1
 
-        if ply >= 100:
+        if quicience_ply >= MAX_QUIECENCE_DEPTH:
             return Evaluator.evaluate(board)
 
         if board.is_check():
@@ -41,7 +42,7 @@ class Bot:
             best_score = -math.inf
             for move in moves:
                 board.push(move)
-                score = -self.quiescence(board, -beta, -alpha, ply + 1)
+                score = -self.quiescence(board, -beta, -alpha, ply + 1, quicience_ply + 1)
                 board.pop()
 
                 if score > best_score:
@@ -60,7 +61,9 @@ class Bot:
         if stand_pat > alpha:
             alpha = stand_pat
 
-        for move in order_moves(board, generate_quiescence_moves(board)):
+
+        candidates = []
+        for move in generate_quiescence_moves(board):
             if not move.promotion:
                 to_sq = move.to_square
                 victim = (
@@ -70,9 +73,11 @@ class Bot:
                 # skip move if we can't improve the score enough to beat alpha
                 if stand_pat + gain + DELTA_PRUNING < alpha:
                     continue
+            candidates.append(move)
 
+        for move in order_moves(board, candidates):
             board.push(move)
-            score = -self.quiescence(board, -beta, -alpha, ply + 1)
+            score = -self.quiescence(board, -beta, -alpha, ply + 1, quicience_ply + 1)
             board.pop()
 
             if score > best_score:
@@ -96,10 +101,11 @@ class Bot:
 
         if board.halfmove_clock >= 100:
             return 0  # 50 move rule
-        if board.is_insufficient_material():
-            return 0  # insufficient material
+        if chess.popcount(board.occupied) <= 4: # only bother checking insufficient if low material count
+            if board.is_insufficient_material():
+                return 0  # insufficient material
         if depth <= 0:
-            return self.quiescence(board, alpha, beta, ply)
+            return self.quiescence(board, alpha, beta, ply, quicience_ply = 0)
 
         moves = order_moves(board)
 

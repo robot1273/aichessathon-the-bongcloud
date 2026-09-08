@@ -28,20 +28,19 @@ def score_move(board: chess.Board, move: chess.Move) -> int:
 
     return 0
 
-
 def generate_quiescence_moves(board: chess.Board) -> list[chess.Move]:
     """Generate candidate tactical moves for quiescence search: captures and queen promotions."""
     moves = list(board.generate_legal_captures())
     turn = board.turn
     promo_rank = chess.BB_RANK_7 if turn == chess.WHITE else chess.BB_RANK_2
-    if board.pawns & board.occupied_co[turn] & promo_rank:
+    pawn_mask = board.pawns & board.occupied_co[turn] & promo_rank
+    if pawn_mask:
         target_rank = chess.BB_RANK_8 if turn == chess.WHITE else chess.BB_RANK_1
-        for move in board.generate_legal_moves(from_mask=promo_rank, to_mask=target_rank):
+        for move in board.generate_legal_moves(from_mask=pawn_mask, to_mask=target_rank):
             if move.promotion == chess.QUEEN and not board.is_capture(move):
                 moves.append(move)
 
     return moves
-
 
 def order_moves(
     board: chess.Board,
