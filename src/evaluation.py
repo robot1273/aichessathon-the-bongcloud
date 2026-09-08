@@ -265,7 +265,7 @@ def _evaluate_kernel(
 
     score = mg_diff * mg_phase + eg_diff * eg_phase
 
-    return score // GAMEPHASE_SUM if score >= 0 else -((-score) // GAMEPHASE_SUM)
+    return int(score // GAMEPHASE_SUM if score >= 0 else -((-score) // GAMEPHASE_SUM))
 
 
 class Evaluator:

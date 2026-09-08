@@ -1,16 +1,14 @@
-"""profile performance on function calls"""
-
 import argparse
 import cProfile
 import pstats
 
 import chess
 
-from ..search import Bot
-from .positions import BENCHMARK_POSITIONS
+from src.scripts.positions import BENCHMARK_POSITIONS
+from src.search import Bot
 
 
-def run_benchmark(depth: int):
+def run_benchmark(depth: int) -> None:
     bot = Bot()
     for _, fen in BENCHMARK_POSITIONS:
         board = chess.Board(fen)
@@ -18,7 +16,7 @@ def run_benchmark(depth: int):
         _ = bot.get_best_move(board, depth=depth)
 
 
-def profile_codebase(depth: int, top_n: int):
+def profile_codebase(depth: int, top_n: int) -> None:
     profiler = cProfile.Profile()
 
     print(f"\n================ CODEBASE PROFILER (Depth {depth}) ================")

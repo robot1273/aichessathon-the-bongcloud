@@ -3,13 +3,21 @@ from typing import Final
 import chess
 
 PIECE_VALUES: Final[tuple[int, ...]] = (0, 100, 320, 330, 500, 900, 0)
+TT_MOVE_SCORE: Final[int] = 100000
 PROMOTION_SCORE: Final[int] = 90000
 CAPTURE_SCORE_BASE: Final[int] = 70000
 CASTLE_SCORE: Final[int] = 60000
 
 
-def score_move(board: chess.Board, move: chess.Move) -> int:
-    """Score a move for move ordering (promotions > captures with MVV-LVA > castling > quiet)."""
+def score_move(
+    board: chess.Board,
+    move: chess.Move,
+    tt_move: chess.Move | None = None,
+) -> int:
+    """Score a move for move ordering (TT move > promotions > MVV-LVA > castling > quiet)."""
+    if move == tt_move:
+        return TT_MOVE_SCORE
+
     promo = move.promotion
     if promo:
         return PROMOTION_SCORE + (9000 if promo == chess.QUEEN else 2000)
@@ -45,12 +53,12 @@ def generate_quiescence_moves(board: chess.Board) -> list[chess.Move]:
 def order_moves(
     board: chess.Board,
     moves: list[chess.Move] | None = None,
+    tt_move: chess.Move | None = None,
 ) -> list[chess.Move]:
-    """Order moves by priority (promotions, captures with MVV-LVA, castling, quiet)."""
     if moves is None:
         moves = list(board.legal_moves)
     if len(moves) <= 1:
         return moves
 
-    moves.sort(key=lambda m: score_move(board, m), reverse=True)
+    moves.sort(key=lambda m: score_move(board, m, tt_move), reverse=True)
     return moves

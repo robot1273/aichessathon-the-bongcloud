@@ -3,8 +3,8 @@ import time
 
 import chess
 
-from ..search import Bot
-from .positions import BENCHMARK_POSITIONS
+from src.scripts.positions import BENCHMARK_POSITIONS
+from src.search import Bot
 
 
 def profile_bot(depth: int) -> None:
