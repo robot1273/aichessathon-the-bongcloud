@@ -12,20 +12,38 @@ from .move_ordering import (
     generate_quiescence_moves,
     order_moves,
 )
+from .time_manager import TimeManager
 from .tt import TT, Bound, score_from_tt, score_to_tt
 from .zobrist import calculate_hash, push_hash
 
 RNG = random.Random(os.environ.get("HARNESS_SEED", "69"))  # Not-so constant RNG constnat
 MATE_SCORE: Final[int] = 1_000_000
+MATE_THRESHOLD: Final[int] = 900_000
 INF: Final[int] = MATE_SCORE + 1
 DELTA_PRUNING: Final[int] = 2 * PIECE_VALUES[chess.PAWN]
 MAX_QUIECENCE_DEPTH: Final[int] = 16
+MAX_DEPTH: Final[int] = 100
+NODE_CHECK_INTERVAL: Final[int] = 2048
+
+
+class SearchAborted(Exception):
+    pass
 
 
 class Bot:
     def __init__(self, tt_exp_size: int = 20) -> None:
-        self.nodes_visited = 0
         self.tt = TT(exp_size=tt_exp_size)
+        self.time_mgr = TimeManager()
+        self.nodes: int = 0
+        self.sel_depth: int = 0
+
+    @property
+    def nodes_visited(self) -> int:
+        return self.nodes
+
+    @nodes_visited.setter
+    def nodes_visited(self, value: int) -> None:
+        self.nodes = value
 
     def clear_tt(self) -> None:
         self.tt.clear()
@@ -38,7 +56,9 @@ class Bot:
         ply: int,
         quicience_ply: int,
     ) -> int:
-        self.nodes_visited += 1
+        self.nodes += 1
+        if ply > self.sel_depth:
+            self.sel_depth = ply
 
         if quicience_ply >= MAX_QUIECENCE_DEPTH:
             return Evaluator.evaluate(board)
@@ -106,7 +126,12 @@ class Bot:
         ply: int,
         current_hash: int | None = None,
     ) -> int:
-        self.nodes_visited += 1
+        self.nodes += 1
+        if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
+            raise SearchAborted
+
+        if ply > self.sel_depth:
+            self.sel_depth = ply
 
         if current_hash is None:
             current_hash = calculate_hash(board)
@@ -192,40 +217,95 @@ class Bot:
 
         return best_score
 
-    def get_best_move(self, board: chess.Board, depth: int) -> chess.Move:
+    def get_best_move(
+        self,
+        board: chess.Board,
+        time_left_ms: int = 100_000,
+        depth: int | None = None,
+    ) -> chess.Move:
+        self.time_mgr.start(time_left_ms, board)
         self.tt.new_search()
         root_hash = calculate_hash(board)
 
-        alpha, beta = -INF, INF
-        best_moves: list[chess.Move] = []
-        best_score = -INF
-
-        tt_entry = self.tt.probe(root_hash)
-        tt_move = tt_entry.best_move if tt_entry is not None else None
-
-        moves = order_moves(board, tt_move=tt_move)
-        if not moves:
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
             return chess.Move.null()
+        if len(legal_moves) == 1:
+            return legal_moves[0]
 
-        for move in moves:
-            new_hash = push_hash(board, move, root_hash)
-            score = -self.negamax(board, depth - 1, -beta, -alpha, ply=1, current_hash=new_hash)
-            board.pop()
+        best_move = legal_moves[0]
+        best_score = -INF
+        prev_score: int | None = None
+        target_depth = depth if depth is not None else MAX_DEPTH
 
-            if score > best_score:
-                best_score = score
-                best_moves = [move]
-            elif score == best_score:
-                best_moves.append(move)
+        for current_depth in range(1, target_depth + 1):
+            self.nodes = 0
+            self.sel_depth = 0
 
-            alpha = max(alpha, score)
+            alpha, beta = -INF, INF
+            curr_best_moves: list[chess.Move] = []
+            curr_best_score = -INF
 
-        chosen_move = RNG.choice(best_moves)
-        self.tt.store(
-            root_hash,
-            chosen_move,
-            score_to_tt(best_score, ply=0),
-            depth,
-            Bound.EXACT,
-        )
-        return chosen_move
+            tt_entry = self.tt.probe(root_hash)
+            tt_move = tt_entry.best_move if tt_entry is not None else None
+
+            moves = order_moves(board, tt_move=tt_move)
+            try:
+                for move in moves:
+                    new_hash = push_hash(board, move, root_hash)
+                    score = -self.negamax(
+                        board, current_depth - 1, -beta, -alpha, ply=1, current_hash=new_hash
+                    )
+                    board.pop()
+
+                    if score > curr_best_score:
+                        curr_best_score = score
+                        curr_best_moves = [move]
+                    elif score == curr_best_score:
+                        curr_best_moves.append(move)
+
+                    alpha = max(alpha, score)
+
+                chosen_move = RNG.choice(curr_best_moves)
+                best_move = chosen_move
+                self.time_mgr.extend_if_unstable(prev_score, curr_best_score)
+                prev_score = curr_best_score
+                best_score = curr_best_score
+
+                self.tt.store(
+                    root_hash,
+                    chosen_move,
+                    score_to_tt(best_score, ply=0),
+                    current_depth,
+                    Bound.EXACT,
+                )
+            except SearchAborted:
+                break
+
+            elapsed = max(self.time_mgr.elapsed(), 0.001)
+            nps = int(self.nodes / elapsed)
+            elapsed_ms = int(elapsed * 1000)
+            score_str = self._format_score(best_score)
+            print(
+                f"depth {current_depth:>2}/{self.sel_depth:<3} "
+                f"score {score_str:>8} "
+                f"nodes {self.nodes:>9,} "
+                f"nps {nps:>9,} "
+                f"time {elapsed_ms:>6}ms "
+                f"pv {best_move.uci()}"
+            )
+
+            if abs(best_score) > MATE_THRESHOLD:
+                break
+            if depth is None and self.time_mgr.should_stop_iterating():
+                break
+
+        return best_move
+
+    @staticmethod
+    def _format_score(score: int) -> str:
+        if abs(score) > MATE_THRESHOLD:
+            plies = MATE_SCORE - abs(score)
+            mate_in = (plies + 1) // 2
+            return f"mate {mate_in}" if score > 0 else f"mate -{mate_in}"
+        return f"cp {score}"

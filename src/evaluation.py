@@ -220,8 +220,8 @@ def _evaluate_kernel(
     occupied_white: np.uint64,
     occupied_black: np.uint64,
     white_to_move: bool,
-) -> int:
-    """Return a PeSTO score from the side-to-move's perspective."""
+) -> tuple[int, int]:
+    """Return (score, raw_game_phase) — score from the side-to-move's perspective."""
     piece_masks = (pawns, knights, bishops, rooks, queens, kings)
     occupancies = (occupied_white, occupied_black)
 
@@ -264,8 +264,9 @@ def _evaluate_kernel(
     eg_phase = GAMEPHASE_SUM - mg_phase
 
     score = mg_diff * mg_phase + eg_diff * eg_phase
+    final_score = int(score // GAMEPHASE_SUM if score >= 0 else -((-score) // GAMEPHASE_SUM))
 
-    return int(score // GAMEPHASE_SUM if score >= 0 else -((-score) // GAMEPHASE_SUM))
+    return final_score, int(mg_phase)
 
 
 class Evaluator:
@@ -274,8 +275,7 @@ class Evaluator:
     _kernel = staticmethod(_evaluate_kernel)
 
     @classmethod
-    def evaluate(cls, board: chess.Board) -> int:
-        """Evaluate a chess position using PeSTO evaluation."""
+    def _call_kernel(cls, board: chess.Board) -> tuple[int, int]:
         return cls._kernel(
             np.uint64(board.pawns),
             np.uint64(board.knights),
@@ -287,6 +287,18 @@ class Evaluator:
             np.uint64(board.occupied_co[chess.BLACK]),
             board.turn == chess.WHITE,
         )
+
+    @classmethod
+    def evaluate(cls, board: chess.Board) -> int:
+        """Evaluate a chess position using PeSTO evaluation."""
+        score, _ = cls._call_kernel(board)
+        return score
+
+    @classmethod
+    def evaluate_with_phase(cls, board: chess.Board) -> tuple[int, float]:
+        """Return (score, game_phase) where phase is 0.0 (endgame) to 1.0 (opening)."""
+        score, raw_phase = cls._call_kernel(board)
+        return score, raw_phase / GAMEPHASE_SUM
 
     @classmethod
     def warmup_evaluator(cls) -> None:

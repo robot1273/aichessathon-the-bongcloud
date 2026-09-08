@@ -23,4 +23,4 @@ def get_move(fen: str, time_left_ms: int) -> str:
     log only your team can read, after validation and after every rated game.
     """
     board = chess.Board(fen)
-    return bot.get_best_move(board, 4).uci()
+    return bot.get_best_move(board, time_left_ms).uci()
