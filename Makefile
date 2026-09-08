@@ -20,9 +20,9 @@ gate:
 	uv run python -m harness.arena --opponent baselines/random --games 2 --base-ms 5000
 
 profile_nps:
-	uv run python -m src.scripts.profile_nps $(if $(AGENT),--agent "$(AGENT)") $(if $(DEPTH),--depth "$(DEPTH)")
+	uv run python -m src.scripts.profile_nps $(if $(AGENT),--agent "$(AGENT)") $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)
 
 .PHONY: profile-codebase
 
 profile:
-	uv run python -m src.scripts.profile_funcs $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TOP),--top "$(TOP)")
+	uv run python -m src.scripts.profile_funcs $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(TOP),--top "$(TOP)") $(if $(SORT),--sort "$(SORT)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)

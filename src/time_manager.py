@@ -20,12 +20,27 @@ class TimeManager:
         self._soft_limit: float = 0.0
         self._hard_limit: float = 0.0
         self._stopped: bool = True
+        self._is_fixed_time: bool = False
 
-    def start(self, time_left_ms: int, board: chess.Board) -> None:
+    def start(
+        self,
+        time_left_ms: int,
+        board: chess.Board,
+        movetime_ms: int | None = None,
+    ) -> None:
         """Begin the clock for one move."""
         self._start = time.monotonic()
         self._stopped = False
 
+        if movetime_ms is not None:
+            self._is_fixed_time = True
+            usable = max(movetime_ms / 1000.0, 0.001)
+            # For fixed move time: stop starting new iterations at 80% time, hard cutoff at 100%
+            self._soft_limit = usable * 0.80
+            self._hard_limit = usable
+            return
+
+        self._is_fixed_time = False
         usable = max(time_left_ms / 1000.0 - self.SAFETY_S, 0.01)
         _, phase = Evaluator.evaluate_with_phase(board)
         base = self._base_time(usable, board.fullmove_number, phase)
@@ -35,6 +50,8 @@ class TimeManager:
 
     def extend_if_unstable(self, prev_score: int | None, curr_score: int | None) -> None:
         """Widen limits when the score swings between iterations."""
+        if self._is_fixed_time:
+            return
         if prev_score is None or curr_score is None:
             return
         swing = abs(curr_score - prev_score)

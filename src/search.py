@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
-from typing import Final
+from collections.abc import Callable, Iterator
+from typing import Any, Final
 
 import chess
 
@@ -57,7 +57,12 @@ class Bot:
         self.killers = KillerTable()
         self.history = HistoryTable()
         self.nodes: int = 0
+        self.iter_nodes: int = 0
         self.sel_depth: int = 0
+        self.completed_depth: int = 0
+        self.best_move: chess.Move | None = None
+        self.best_score: int = 0
+        self.iterations: list[dict[str, Any]] = []
 
     @property
     def nodes_visited(self) -> int:
@@ -72,8 +77,11 @@ class Bot:
         board: chess.Board,
         time_left_ms: int = 100_000,
         depth: int | None = None,
+        movetime_ms: int | None = None,
+        verbose: bool = True,
+        callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> chess.Move:
-        self.time_mgr.start(time_left_ms, board)
+        self.time_mgr.start(time_left_ms, board, movetime_ms=movetime_ms)
         self.tt.new_search()
         self.killers.clear()
 
@@ -90,8 +98,12 @@ class Bot:
         prev_best: int | None = None
         target_depth = depth if depth is not None else MAX_DEPTH
 
+        self.nodes = 0
+        self.completed_depth = 0
+        self.iterations = []
+
         for current_depth in range(1, target_depth + 1):
-            self.nodes = 0
+            self.iter_nodes = 0
             self.sel_depth = 0
 
             try:
@@ -104,6 +116,8 @@ class Bot:
             if move is not None:
                 best_move = move
                 best_score = score
+                self.completed_depth = current_depth
+
             self.time_mgr.extend_if_unstable(prev_best, best_score)
             prev_best = best_score
             prev_score = best_score
@@ -112,20 +126,40 @@ class Bot:
             nps = int(self.nodes / elapsed)
             elapsed_ms = int(elapsed * 1000)
             score_str = self._format_score(best_score)
-            print(
-                f"depth {current_depth:>2}/{self.sel_depth:<3} "
-                f"score {score_str:>8} "
-                f"nodes {self.nodes:>9,} "
-                f"nps {nps:>9,} "
-                f"time {elapsed_ms:>6}ms "
-                f"pv {best_move.uci()}"
-            )
+
+            iter_info: dict[str, Any] = {
+                "depth": current_depth,
+                "sel_depth": self.sel_depth,
+                "score": best_score,
+                "score_str": score_str,
+                "nodes": self.nodes,
+                "iter_nodes": self.iter_nodes,
+                "nps": nps,
+                "time": elapsed,
+                "time_ms": elapsed_ms,
+                "pv": best_move,
+            }
+            self.iterations.append(iter_info)
+
+            if callback is not None:
+                callback(iter_info)
+            elif verbose:
+                print(
+                    f"depth {current_depth:>2}/{self.sel_depth:<3} "
+                    f"score {score_str:>8} "
+                    f"nodes {self.nodes:>9,} "
+                    f"nps {nps:>9,} "
+                    f"time {elapsed_ms:>6}ms "
+                    f"pv {best_move.uci()}"
+                )
 
             if abs(best_score) > MATE_THRESHOLD:
                 break
-            if depth is None and self.time_mgr.should_stop_iterating():
+            if (depth is None or movetime_ms is not None) and self.time_mgr.should_stop_iterating():
                 break
 
+        self.best_move = best_move
+        self.best_score = best_score
         return best_move
 
     def _search_root(
@@ -238,6 +272,7 @@ class Bot:
         null_move_made: bool,
     ) -> int:
         self.nodes += 1
+        self.iter_nodes += 1
         if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
             raise SearchAborted
 
@@ -526,6 +561,10 @@ class Bot:
         self, board: chess.Board, alpha: int, beta: int, ply: int
     ) -> int:
         self.nodes += 1
+        self.iter_nodes += 1
+        if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
+            raise SearchAborted
+
         if ply > self.sel_depth:
             self.sel_depth = ply
         if ply >= MAX_DEPTH:
