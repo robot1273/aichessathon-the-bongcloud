@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import random
 from typing import Final
 
 import chess
@@ -18,7 +16,6 @@ from .time_manager import TimeManager
 from .tt import TT, Bound, score_from_tt, score_to_tt
 from .zobrist import calculate_hash, push_hash
 
-RNG = random.Random(os.environ.get("HARNESS_SEED", "69"))  # Not-so constant RNG constnat
 MATE_SCORE: Final[int] = 1_000_000
 MATE_THRESHOLD: Final[int] = 900_000
 INF: Final[int] = MATE_SCORE + 1
@@ -26,6 +23,10 @@ DELTA_PRUNING: Final[int] = 2 * PIECE_VALUES[chess.PAWN]
 MAX_QUIECENCE_DEPTH: Final[int] = 16
 MAX_DEPTH: Final[int] = 100
 NODE_CHECK_INTERVAL: Final[int] = 2048
+
+ASP_INITIAL_DELTA: Final[int] = 25
+ASP_MAX_DELTA: Final[int] = 500
+ASP_MIN_DEPTH: Final[int] = 5
 
 
 class SearchAborted(Exception):
@@ -132,7 +133,7 @@ class Bot:
 
         return best_score
 
-    def negamax(
+    def _pvs(
         self,
         board: chess.Board,
         depth: int,
@@ -140,6 +141,7 @@ class Bot:
         beta: int,
         ply: int,
         current_hash: int,
+        null_move_made: bool = False,
     ) -> int:
         self.nodes += 1
         if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
@@ -156,15 +158,19 @@ class Bot:
             if board.is_insufficient_material():
                 return 0
 
-        alpha_orig = alpha
-        is_pv_node = (beta - alpha) > 1
+        alpha = max(alpha, -(MATE_SCORE - ply))
+        beta = min(beta, MATE_SCORE - ply - 1)
+        if alpha >= beta:
+            return alpha
+
+        is_pv = beta - alpha > 1
         tt_move: chess.Move | None = None
 
         tt_entry = self.tt.probe(current_hash)
         if tt_entry is not None:
             tt_move = tt_entry.best_move
 
-            if tt_entry.depth >= depth and not is_pv_node:
+            if tt_entry.depth >= depth and not is_pv:
                 tt_score = score_from_tt(tt_entry.score, ply)
 
                 if (
@@ -177,21 +183,24 @@ class Bot:
         if depth <= 0:
             return self.quiescence(board, alpha, beta, ply, quicience_ply=0)
 
+        alpha_orig = alpha
         best_score = -INF
         best_move = tt_move
+        moves_tried = 0
+        searched_quiets: list[chess.Move] = []
 
-        # early TT move test: try tt_move before generating and ordering all other moves!
+        # Early TT move test
         if tt_move is not None and board.is_legal(tt_move):
             is_capture = board.is_capture(tt_move)
             is_tactical = is_capture or (tt_move.promotion is not None)
 
             new_hash = push_hash(board, tt_move, current_hash)
-            score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1, current_hash=new_hash)
+            score = -self._pvs(board, depth - 1, -beta, -alpha, ply + 1, new_hash, False)
             board.pop()
 
-            if score > best_score:
-                best_score = score
-                best_move = tt_move
+            moves_tried = 1
+            best_score = score
+            best_move = tt_move
             if score > alpha:
                 alpha = score
             if alpha >= beta:
@@ -208,6 +217,8 @@ class Bot:
                     Evaluator.evaluate(board),
                 )
                 return best_score
+            if not is_tactical:
+                searched_quiets.append(tt_move)
 
         moves = order_moves(
             board,
@@ -216,13 +227,8 @@ class Bot:
             killers=self.killers,
             history=self.history,
         )
-        if not moves:  # we are being checkmated! (or drawing)
+        if not moves and moves_tried == 0:
             return -(MATE_SCORE - ply) if board.is_check() else 0
-
-        if best_move is None:
-            best_move = moves[0]
-
-        searched_quiets: list[chess.Move] = []
 
         for move in moves:
             if move == tt_move:
@@ -232,8 +238,14 @@ class Bot:
             is_tactical = is_capture or (move.promotion is not None)
 
             new_hash = push_hash(board, move, current_hash)
-            score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1, current_hash=new_hash)
+            if moves_tried == 0:
+                score = -self._pvs(board, depth - 1, -beta, -alpha, ply + 1, new_hash, False)
+            else:
+                score = -self._pvs(board, depth - 1, -alpha - 1, -alpha, ply + 1, new_hash, False)
+                if is_pv and alpha < score < beta:
+                    score = -self._pvs(board, depth - 1, -beta, -alpha, ply + 1, new_hash, False)
             board.pop()
+            moves_tried += 1
 
             if score > best_score:
                 best_score = score
@@ -250,12 +262,11 @@ class Bot:
             if not is_tactical:
                 searched_quiets.append(move)
 
-        if best_score <= alpha_orig:
-            bound = Bound.UPPER
-        elif best_score >= beta:
-            bound = Bound.LOWER
-        else:
-            bound = Bound.EXACT
+        bound = (
+            Bound.UPPER
+            if best_score <= alpha_orig
+            else (Bound.LOWER if best_score >= beta else Bound.EXACT)
+        )
 
         tt_score = score_to_tt(best_score, ply)
         self.tt.store(
@@ -268,6 +279,105 @@ class Bot:
         )
 
         return best_score
+
+    def _search_root(
+        self,
+        board: chess.Board,
+        depth: int,
+        prev_score: int,
+        root_hash: int,
+    ) -> tuple[int, chess.Move | None]:
+        if depth < ASP_MIN_DEPTH:
+            return self._pvs_root(board, depth, -INF, INF, root_hash)
+
+        delta = ASP_INITIAL_DELTA
+        alpha = prev_score - delta
+        beta = prev_score + delta
+
+        while True:
+            score, move = self._pvs_root(board, depth, alpha, beta, root_hash)
+            if score <= alpha:
+                delta *= 2
+                alpha = -INF if delta >= ASP_MAX_DELTA else prev_score - delta
+                beta = (alpha + beta) // 2 + delta
+            elif score >= beta:
+                delta *= 2
+                beta = INF if delta >= ASP_MAX_DELTA else prev_score + delta
+                alpha = (alpha + beta) // 2 - delta
+            else:
+                return score, move
+
+    def _pvs_root(
+        self,
+        board: chess.Board,
+        depth: int,
+        alpha: int,
+        beta: int,
+        root_hash: int,
+    ) -> tuple[int, chess.Move | None]:
+        tt_entry = self.tt.probe(root_hash)
+        tt_move = tt_entry.best_move if tt_entry is not None else None
+
+        moves = order_moves(
+            board,
+            tt_move=tt_move,
+            ply=0,
+            killers=self.killers,
+            history=self.history,
+        )
+        if not moves:
+            return (-MATE_SCORE if board.is_check() else 0), None
+
+        best_move = moves[0]
+        best_score = -INF
+        searched_quiets: list[chess.Move] = []
+
+        for i, move in enumerate(moves):
+            is_capture = board.is_capture(move)
+            new_hash = push_hash(board, move, root_hash)
+
+            if i == 0:
+                score = -self._pvs(board, depth - 1, -beta, -alpha, 1, new_hash, False)
+            else:
+                score = -self._pvs(
+                    board, depth - 1, -alpha - 1, -alpha, 1, new_hash, False
+                )
+                if alpha < score < beta:
+                    score = -self._pvs(
+                        board, depth - 1, -beta, -alpha, 1, new_hash, False
+                    )
+
+            board.pop()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+            if score > alpha:
+                alpha = score
+            if alpha >= beta:
+                if not is_capture and not move.promotion:
+                    self.killers.store(0, move)
+                    self.history.update(board.turn, move, depth)
+                    for prev in searched_quiets:
+                        self.history.penalise(board.turn, prev, depth)
+                break
+            if not is_capture and not move.promotion:
+                searched_quiets.append(move)
+
+        bound = (
+            Bound.UPPER
+            if best_score <= alpha
+            else (Bound.LOWER if best_score >= beta else Bound.EXACT)
+        )
+        self.tt.store(
+            root_hash,
+            best_move,
+            score_to_tt(best_score, 0),
+            depth,
+            bound,
+            Evaluator.evaluate(board),
+        )
+        return best_score, best_move
 
     def get_best_move(
         self,
@@ -288,74 +398,27 @@ class Bot:
 
         best_move = legal_moves[0]
         best_score = -INF
-        prev_score: int | None = None
+        prev_score = 0
+        prev_best: int | None = None
         target_depth = depth if depth is not None else MAX_DEPTH
 
         for current_depth in range(1, target_depth + 1):
             self.nodes = 0
             self.sel_depth = 0
 
-            alpha, beta = -INF, INF
-            curr_best_moves: list[chess.Move] = []
-            curr_best_score = -INF
-
-            tt_entry = self.tt.probe(root_hash)
-            tt_move = tt_entry.best_move if tt_entry is not None else None
-
-            moves = order_moves(
-                board,
-                tt_move=tt_move,
-                ply=0,
-                killers=self.killers,
-                history=self.history,
-            )
-            searched_quiets: list[chess.Move] = []
-
             try:
-                for move in moves:
-                    is_capture = board.is_capture(move)
-                    is_tactical = is_capture or (move.promotion is not None)
-
-                    new_hash = push_hash(board, move, root_hash)
-                    score = -self.negamax(
-                        board, current_depth - 1, -beta, -alpha, ply=1, current_hash=new_hash
-                    )
-                    board.pop()
-
-                    if score > curr_best_score:
-                        curr_best_score = score
-                        curr_best_moves = [move]
-                    elif score == curr_best_score:
-                        curr_best_moves.append(move)
-
-                    if score > alpha:
-                        alpha = score
-                    if alpha >= beta:
-                        if not is_tactical:
-                            self.killers.store(0, move)
-                            self.history.update(board.turn, move, current_depth)
-                            for prev in searched_quiets:
-                                self.history.penalise(board.turn, prev, current_depth)
-                        break
-                    if not is_tactical:
-                        searched_quiets.append(move)
-
-                chosen_move = RNG.choice(curr_best_moves)
-                best_move = chosen_move
-                self.time_mgr.extend_if_unstable(prev_score, curr_best_score)
-                prev_score = curr_best_score
-                best_score = curr_best_score
-
-                self.tt.store(
-                    root_hash,
-                    chosen_move,
-                    score_to_tt(best_score, ply=0),
-                    current_depth,
-                    Bound.EXACT,
-                    Evaluator.evaluate(board),
+                score, move = self._search_root(
+                    board, current_depth, prev_score, root_hash
                 )
             except SearchAborted:
                 break
+
+            if move is not None:
+                best_move = move
+                best_score = score
+            self.time_mgr.extend_if_unstable(prev_best, best_score)
+            prev_best = best_score
+            prev_score = best_score
 
             elapsed = max(self.time_mgr.elapsed(), 0.001)
             nps = int(self.nodes / elapsed)
