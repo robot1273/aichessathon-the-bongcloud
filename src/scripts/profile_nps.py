@@ -1,9 +1,10 @@
 import argparse
 import time
+
 import chess
+from positions import BENCHMARK_POSITIONS
 
 from ..search import Bot
-from ..constants import BENCHMARK_POSITIONS
 
 
 def profile_bot(depth: int) -> None:
@@ -45,7 +46,9 @@ def profile_bot(depth: int) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Profile Bot search performance in NPS.")
     parser.add_argument("--depth", type=int, default=5, help="Search depth limit")
-    parser.add_argument("--agent", type=str, default=".", help="Unused parameter to maintain Makefile compatibility")
+    parser.add_argument(
+        "--agent", type=str, default=".", help="Unused parameter for Makefile compatibility"
+    )
     args = parser.parse_args()
 
     profile_bot(depth=args.depth)

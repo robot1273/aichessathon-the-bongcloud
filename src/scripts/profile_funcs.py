@@ -1,12 +1,14 @@
 """profile performance on function calls"""
 
+import argparse
 import cProfile
 import pstats
-import argparse
+
 import chess
+from positions import BENCHMARK_POSITIONS
 
 from ..search import Bot
-from ..constants import BENCHMARK_POSITIONS
+
 
 def run_benchmark(depth: int):
     bot = Bot()
@@ -14,6 +16,7 @@ def run_benchmark(depth: int):
         board = chess.Board(fen)
         bot.nodes_visited = 0
         _ = bot.get_best_move(board, depth=depth)
+
 
 def profile_codebase(depth: int, top_n: int):
     profiler = cProfile.Profile()
@@ -27,6 +30,7 @@ def profile_codebase(depth: int, top_n: int):
     stats.strip_dirs()
     stats.sort_stats("cumtime")
     stats.print_stats(top_n)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Profile engine bottlenecks.")

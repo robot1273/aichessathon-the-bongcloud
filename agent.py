@@ -1,11 +1,13 @@
 """The submission entrypoint. The platform imports this file and calls get_move."""
 
 import chess
+
 from src.search import Bot
 
 # Import time runs at the game start. 90s to import packages, build tables etc.
 
 bot = Bot()
+
 
 def get_move(fen: str, time_left_ms: int) -> str:
     """Return a legal move in UCI notation.

@@ -1,10 +1,15 @@
 import math
+import os
+import random
 
 import chess
 
-from .constants import MATE_SCORE, RNG
 from .evaluation import Evaluator
 from .move_ordering import order_moves
+
+RNG = random.Random(os.environ.get("HARNESS_SEED", "69"))  # Not-so constant RNG constnat
+MATE_SCORE: float = 1e6
+
 
 class Bot:
     def __init__(self) -> None:
@@ -20,13 +25,16 @@ class Bot:
     ) -> float:
         self.nodes_visited += 1
 
-        if board.halfmove_clock >= 100:      return 0  # 50 move rule
-        if board.is_insufficient_material(): return 0  # insufficient material
-        if depth <= 0:                       return Evaluator.evaluate(board) # root evaluation call
+        if board.halfmove_clock >= 100:
+            return 0  # 50 move rule
+        if board.is_insufficient_material():
+            return 0  # insufficient material
+        if depth <= 0:
+            return Evaluator.evaluate(board)  # root evaluation call
 
         moves = order_moves(board)
 
-        if not moves: # we are being checkmated! (or drawing)
+        if not moves:  # we are being checkmated! (or drawing)
             return -(MATE_SCORE - ply) if board.is_check() else 0
 
         best_score = -math.inf
@@ -34,12 +42,14 @@ class Bot:
             board.push(move)
             score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
             board.pop()
-            if score > best_score: best_score = score
-            if score > alpha: alpha = score
-            if alpha >= beta: break
+            if score > best_score:
+                best_score = score
+            if score > alpha:
+                alpha = score
+            if alpha >= beta:
+                break
 
         return best_score
-
 
     def get_best_move(self, board: chess.Board, depth: int) -> chess.Move:
         alpha, beta = -math.inf, math.inf
