@@ -6,9 +6,12 @@ import chess.polyglot
 # Extract canonical 64-bit Zobrist keys from python-chess's precompiled Polyglot array
 _ARR: Final[list[int]] = chess.polyglot.POLYGLOT_RANDOM_ARRAY
 
-# Pre-indexed for O(1) piece key lookup: [color (0..1)][piece_type - 1 (0..5)][square (0..63)]
+# Pre-indexed by white then black, unlike python-chess's black-then-white bitboards.
 PIECE_KEYS: Final[tuple[tuple[tuple[int, ...], ...], ...]] = tuple(
-    tuple(tuple(_ARR[64 * ((p - 1) * 2 + c) + sq] for sq in range(64)) for p in range(1, 7))
+    tuple(
+        tuple(_ARR[64 * ((p - 1) * 2 + (1 - c)) + sq] for sq in range(64))
+        for p in range(1, 7)
+    )
     for c in range(2)
 )
 CASTLING_KEYS: Final[tuple[int, ...]] = tuple(_ARR[768 + i] for i in range(4))
@@ -25,8 +28,29 @@ def calculate_hash(board: chess.Board) -> int:
     return chess.polyglot.zobrist_hash(board)
 
 
+def _ep_key(board: chess.Board) -> int:
+    ep_square = board.ep_square
+    if ep_square is None:
+        return 0
+
+    capturers = chess.shift_down(chess.BB_SQUARES[ep_square])
+    if board.turn == chess.BLACK:
+        capturers = chess.shift_up(chess.BB_SQUARES[ep_square])
+    capturers = chess.shift_left(capturers) | chess.shift_right(capturers)
+    if capturers & board.pawns & board.occupied_co[board.turn]:
+        return EP_KEYS[ep_square & 7]
+    return 0
+
+
 def push_hash(board: chess.Board, move: chess.Move, h: int) -> int:
     """Incrementally update the Zobrist hash across a move and push to board."""
+    h ^= TURN_KEY
+    h ^= _ep_key(board)
+
+    if not move:
+        board.push(move)
+        return h
+
     turn = board.turn
     c = 0 if turn == chess.WHITE else 1
     opp_c = 1 - c
@@ -37,11 +61,7 @@ def push_hash(board: chess.Board, move: chess.Move, h: int) -> int:
     assert piece_type is not None
     p = piece_type - 1
 
-    h ^= TURN_KEY
-
     old_ep = board.ep_square
-    if old_ep is not None:
-        h ^= EP_KEYS[old_ep & 7]
 
     old_castling = board.castling_rights
 
@@ -72,9 +92,7 @@ def push_hash(board: chess.Board, move: chess.Move, h: int) -> int:
 
     board.push(move)
 
-    new_ep = board.ep_square
-    if new_ep is not None:
-        h ^= EP_KEYS[new_ep & 7]
+    h ^= _ep_key(board)
 
     castling_diff = old_castling ^ board.castling_rights
     if castling_diff:

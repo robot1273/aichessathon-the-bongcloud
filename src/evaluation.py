@@ -225,9 +225,10 @@ def _evaluate_kernel(
     piece_masks = (pawns, knights, bishops, rooks, queens, kings)
     occupancies = (occupied_white, occupied_black)
 
-    # Index 0 is White; index 1 is Black.
-    mg_scores = np.zeros(2, dtype=np.int64)
-    eg_scores = np.zeros(2, dtype=np.int64)
+    mg_white = 0
+    mg_black = 0
+    eg_white = 0
+    eg_black = 0
     game_phase = 0
 
     for color_index in range(2):
@@ -240,25 +241,24 @@ def _evaluate_kernel(
                 lsb = bb & (np.uint64(0) - bb)
                 square = _LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)]
 
-                mg_scores[color_index] += MG_TABLE[
-                    color_index,
-                    piece_index,
-                    square,
-                ]
-                eg_scores[color_index] += EG_TABLE[
-                    color_index,
-                    piece_index,
-                    square,
-                ]
+                if color_index == 0:
+                    mg_white += MG_TABLE[color_index, piece_index, square]
+                    eg_white += EG_TABLE[color_index, piece_index, square]
+                else:
+                    mg_black += MG_TABLE[color_index, piece_index, square]
+                    eg_black += EG_TABLE[color_index, piece_index, square]
                 game_phase += GAMEPHASE_INC[piece_index]
 
                 bb ^= lsb
 
     side_index = 0 if white_to_move else 1
-    opponent_index = side_index ^ 1
 
-    mg_diff = mg_scores[side_index] - mg_scores[opponent_index]
-    eg_diff = eg_scores[side_index] - eg_scores[opponent_index]
+    if side_index == 0:
+        mg_diff = mg_white - mg_black
+        eg_diff = eg_white - eg_black
+    else:
+        mg_diff = mg_black - mg_white
+        eg_diff = eg_black - eg_white
 
     mg_phase = min(game_phase, GAMEPHASE_SUM)
     eg_phase = GAMEPHASE_SUM - mg_phase
