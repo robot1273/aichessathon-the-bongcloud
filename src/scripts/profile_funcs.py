@@ -5,9 +5,9 @@ import cProfile
 import pstats
 
 import chess
-from .positions import BENCHMARK_POSITIONS
 
 from ..search import Bot
+from .positions import BENCHMARK_POSITIONS
 
 
 def run_benchmark(depth: int):

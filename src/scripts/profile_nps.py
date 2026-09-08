@@ -2,9 +2,9 @@ import argparse
 import time
 
 import chess
-from .positions import BENCHMARK_POSITIONS
 
 from ..search import Bot
+from .positions import BENCHMARK_POSITIONS
 
 
 def profile_bot(depth: int) -> None:
