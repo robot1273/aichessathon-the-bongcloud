@@ -1,6 +1,7 @@
 import argparse
 import math
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 import chess
@@ -105,27 +106,44 @@ class AdaptiveEvaluator:
         self.inc_ms = inc_ms
         self.tolerance_buffer_ms = tolerance_buffer_ms
 
-    def run_benchmark(self, total_games: int = 12, adapt_skill: bool = True) -> EvalStats:
+    def run_benchmark(
+        self,
+        total_games: int = 12,
+        adapt_skill: bool = True,
+        workers: int = 1,
+    ) -> EvalStats:
+        if workers < 1:
+            raise ValueError("workers must be positive")
+        if workers > 1 and adapt_skill:
+            raise ValueError("parallel evaluation requires a fixed Stockfish skill")
+
         stats = EvalStats()
 
         print(f"Starting Engine Match ({total_games} Games)")
         print(
             f"Time Control: {self.base_time_ms}ms + {self.inc_ms}ms inc "
-            f"| Adaptive Skill: {adapt_skill}"
+            f"| Adaptive Skill: {adapt_skill} | Workers: {workers}"
         )
         print("=" * 65)
+
+        if workers > 1:
+            game_ids = range(1, total_games + 1)
+            colors = [chess.WHITE if game_id % 2 != 0 else chess.BLACK for game_id in game_ids]
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(self._play_game, game_id, bot_color)
+                    for game_id, bot_color in zip(game_ids, colors, strict=True)
+                ]
+                for future in futures:
+                    res = future.result()
+                    stats.add_result(res)
+                    self._print_game_result(total_games, res)
+            self._print_summary(stats)
+            return stats
 
         for game_idx in range(1, total_games + 1):
             # Alternate colors every game
             bot_color = chess.WHITE if game_idx % 2 != 0 else chess.BLACK
-            color_str = "White" if bot_color == chess.WHITE else "Black"
-
-            print(
-                f"Game {game_idx:02d}/{total_games:02d} | "
-                f"Bot ({color_str}) vs Stockfish (Skill {self.current_skill})",
-                end=" | ",
-            )
-
             res = self._play_game(game_idx, bot_color)
             stats.add_result(res)
 
@@ -136,17 +154,22 @@ class AdaptiveEvaluator:
                 elif res.bot_score == 0.0 and self.current_skill > 0:
                     self.current_skill -= 1
 
-            bot_result = (
-                "win" if res.bot_score == 1.0 else "draw" if res.bot_score == 0.5 else "loss"
-            )
-            print(
-                f"Bot: {bot_result} | Board: {res.result} ({res.termination_reason}) | "
-                f"Max Move Time: {res.bot_max_move_time_ms:.0f}ms | "
-                f"Violations: {res.time_violations}"
-            )
+            self._print_game_result(total_games, res)
 
         self._print_summary(stats)
         return stats
+
+    @staticmethod
+    def _print_game_result(total_games: int, res: GameResult) -> None:
+        color_str = "White" if res.bot_color == chess.WHITE else "Black"
+        bot_result = "win" if res.bot_score == 1.0 else "draw" if res.bot_score == 0.5 else "loss"
+        print(
+            f"Game {res.game_id:02d}/{total_games:02d} | "
+            f"Bot ({color_str}) vs Stockfish (Skill {res.stockfish_skill}) | "
+            f"Bot: {bot_result} | Board: {res.result} ({res.termination_reason}) | "
+            f"Max Move Time: {res.bot_max_move_time_ms:.0f}ms | "
+            f"Violations: {res.time_violations}"
+        )
 
     def _play_game(self, game_id: int, bot_color: chess.Color) -> GameResult:
         board = chess.Board()
@@ -360,10 +383,17 @@ def main() -> None:
     parser.add_argument("--base-time", type=int, default=9000, help="Base time per game (ms)")
     parser.add_argument("--inc", type=int, default=50, help="Time increment per move (ms)")
     parser.add_argument(
+        "--workers", type=int, default=1, help="Parallel games for fixed-skill evaluation"
+    )
+    parser.add_argument(
         "--static-skill", action="store_true", help="Disable adaptive skill adjustments"
     )
 
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers must be positive")
+    if args.workers > 1 and not args.static_skill:
+        parser.error("--workers requires --static-skill")
 
     evaluator = AdaptiveEvaluator(
         stockfish_path=args.stockfish,
@@ -372,7 +402,11 @@ def main() -> None:
         inc_ms=args.inc,
     )
 
-    evaluator.run_benchmark(total_games=args.games, adapt_skill=not args.static_skill)
+    evaluator.run_benchmark(
+        total_games=args.games,
+        adapt_skill=not args.static_skill,
+        workers=args.workers,
+    )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ import unittest
 
 import chess
 
-from src.scripts.eval import EvalStats, GameResult
+from src.scripts.eval import AdaptiveEvaluator, EvalStats, GameResult
 
 
 class EvalStatsTests(unittest.TestCase):
@@ -38,6 +38,12 @@ class EvalStatsTests(unittest.TestCase):
         elo, _ = stats.calculate_elo()
 
         self.assertAlmostEqual(elo, 1320.0 + 5 * 93.5, places=6)
+
+    def test_parallel_evaluation_requires_fixed_skill(self) -> None:
+        evaluator = AdaptiveEvaluator()
+
+        with self.assertRaisesRegex(ValueError, "fixed Stockfish skill"):
+            evaluator.run_benchmark(workers=2)
 
 
 if __name__ == "__main__":
