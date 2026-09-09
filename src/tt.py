@@ -102,12 +102,12 @@ def store_tt(
     elif old_hash != hash_val:
         old_depth = tt_depth[idx]
         age_diff = (current_age - tt_age[idx]) & 0xFF
-        # Replace if entry is from an older search or if incoming depth is >= old depth
-        replace = age_diff > 0 or depth >= old_depth
+        # Keep recent deep work, but let moderately close or stale entries be replaced.
+        replace = age_diff > 2 or depth >= old_depth - 2
     else:
         old_depth = tt_depth[idx]
         age_diff = (current_age - tt_age[idx]) & 0xFF
-        if depth >= old_depth or age_diff > 0:
+        if depth > old_depth or age_diff > 2:
             replace = True
         elif depth == old_depth and bound == BOUND_EXACT and tt_bound[idx] != BOUND_EXACT:
             replace = True

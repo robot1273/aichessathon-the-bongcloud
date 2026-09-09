@@ -71,27 +71,18 @@ TURN: Final[int] = 8  # 0 for WHITE, 1 for BLACK
 CASTLING: Final[int] = 9  # 4-bit mask (WK=1, WQ=2, BK=4, BQ=8)
 EP_SQUARE: Final[int] = 10  # 0-63, or 64 if none
 HALFMOVE: Final[int] = 11
-FULLMOVE: Final[int] = 12
 
-HASH: Final[int] = 13  # Zobrist hash
+HASH: Final[int] = 12  # Zobrist hash
 
-MG_SCORE_W: Final[int] = 14
-MG_SCORE_B: Final[int] = 15
-EG_SCORE_W: Final[int] = 16
-EG_SCORE_B: Final[int] = 17
+MG_SCORE_W: Final[int] = 13
+MG_SCORE_B: Final[int] = 14
+EG_SCORE_W: Final[int] = 15
+EG_SCORE_B: Final[int] = 16
 
-GAME_PHASE: Final[int] = 18
+GAME_PHASE: Final[int] = 17
+NULL_SEARCH: Final[int] = 18
 
-# Extended Eval Tracking
-BISHOP_COUNT_W: Final[int] = 19
-BISHOP_COUNT_B: Final[int] = 20
-
-MG_BONUS_W: Final[int] = 21
-MG_BONUS_B: Final[int] = 22
-EG_BONUS_W: Final[int] = 23
-EG_BONUS_B: Final[int] = 24
-
-STATE_SIZE: Final[int] = 25
+STATE_SIZE: Final[int] = 19
 
 # ---------------------------------------------------------------------------
 # Zobrist, Castling, and Move Helpers

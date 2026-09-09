@@ -30,6 +30,26 @@ class TranspositionTableTests(unittest.TestCase):
         self.assertEqual(depth, 8)
         self.assertEqual(bound, BOUND_EXACT)
 
+    def test_recent_deep_entry_survives_shallow_collision(self) -> None:
+        self._store(0, 8, BOUND_EXACT, 1)
+        self._store(2, 3, BOUND_LOWER, 2)
+
+        found, _, _, depth, bound, _ = probe_tt(0, *self.arrays)
+
+        self.assertTrue(found)
+        self.assertEqual(depth, 8)
+        self.assertEqual(bound, BOUND_EXACT)
+
+    def test_recent_deep_entry_survives_shallow_same_hash_update(self) -> None:
+        self._store(0, 8, BOUND_EXACT, 1)
+        self._store(0, 3, BOUND_LOWER, 2)
+
+        found, _, _, depth, bound, _ = probe_tt(0, *self.arrays)
+
+        self.assertTrue(found)
+        self.assertEqual(depth, 8)
+        self.assertEqual(bound, BOUND_EXACT)
+
     def test_stale_entry_is_replaced_after_collision(self) -> None:
         self._store(0, 8, BOUND_EXACT, 1)
         self._store(2, 3, BOUND_LOWER, 4)

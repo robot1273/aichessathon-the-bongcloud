@@ -176,6 +176,52 @@ class TestBoard(unittest.TestCase):
         board.make_move(parse_uci_to_move(board, "e2e4"))
         self.assertEqual(board.evaluate(), Board.from_fen(board.fen()).evaluate())
 
+    def test_numba_evaluation_matches_board_after_moves(self) -> None:
+        undo_stack = np.zeros((1, STATE_SIZE), dtype=np.uint64)
+        for fen in TEST_FENS:
+            board = Board.from_fen(fen)
+            state = board_to_state(board)
+            self.assertEqual(board_primitives.evaluate(state), board.evaluate())
+
+            for move in board.generate_moves():
+                board_primitives.make_move(state, undo_stack, 0, move)
+                board.make_move(move)
+                self.assertEqual(
+                    board_primitives.evaluate(state),
+                    board.evaluate(),
+                    f"evaluation mismatch after {move_to_uci(move)} at {fen}",
+                )
+                board.unmake_move()
+                board_primitives.unmake_move(state, undo_stack, 0)
+
+    def test_repetition_scans_same_side_to_move(self) -> None:
+        board = Board.from_fen()
+        cycle = ("g1f3", "g8f6", "f3g1", "f6g8")
+
+        for uci in cycle:
+            board.make_move(parse_uci_to_move(board, uci))
+        self.assertTrue(board.is_repetition(2))
+        self.assertFalse(board.is_repetition(3))
+
+        for uci in cycle:
+            board.make_move(parse_uci_to_move(board, uci))
+        self.assertTrue(board.is_repetition(3))
+
+    def test_insufficient_material_matches_python_chess(self) -> None:
+        fens = (
+            "8/8/8/8/8/8/8/K6k w - - 0 1",
+            "8/8/8/8/8/8/6N1/K6k w - - 0 1",
+            "5b1k/8/8/8/8/8/8/K1B5 w - - 0 1",
+            "6bk/8/8/8/8/8/8/K1B5 w - - 0 1",
+            "8/8/8/8/8/8/5NN1/K6k w - - 0 1",
+        )
+        for fen in fens:
+            self.assertEqual(
+                Board.from_fen(fen).is_insufficient_material(),
+                chess.Board(fen).is_insufficient_material(),
+                fen,
+            )
+
     def test_gives_check(self) -> None:
         """Pre-move gives_check must match whether target position is in check."""
         for fen in TEST_FENS:

@@ -141,6 +141,11 @@ class Bot:
             0,
             *self.tt_arrays,
         )
+        for array in self.tt_arrays:
+            array.fill(0)
+        self.killers.fill(0)
+        self.history.fill(0)
+        self.stats.fill(0)
 
     def get_best_move(
         self,
@@ -180,17 +185,7 @@ class Bot:
             self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
             return legal_moves[0]
 
-        # Prioritize known TT move or best-ordered move for safe emergency fallback
-        found, tt_move_val, _, _, _, _ = probe_tt(
-            np.uint64(board.hash),
-            *self.tt_arrays,
-        )
-        if found and tt_move_val in legal_moves:
-            default_move = tt_move_val
-        else:
-            ordered = order_moves(board, legal_moves, tt_move=tt_move_val if found else 0)
-            default_move = ordered[0]
-
+        default_move = legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
             self.best_move = default_move
             self.nodes = 0
@@ -201,6 +196,17 @@ class Bot:
             self._record_selected_move(board, default_move)
             self._record_timing(0, None, 0.0, False, False, False, None, "request-deadline")
             return default_move
+
+        # Prioritize known TT move or best-ordered move for safe emergency fallback.
+        found, tt_move_val, _, _, _, _ = probe_tt(
+            np.uint64(board.hash),
+            *self.tt_arrays,
+        )
+        if found and tt_move_val in legal_moves:
+            default_move = tt_move_val
+        else:
+            ordered = order_moves(board, legal_moves, tt_move=tt_move_val if found else 0)
+            default_move = ordered[0]
 
         state = board_to_state(board)
         start_t = self.time_mgr.elapsed()

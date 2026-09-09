@@ -15,8 +15,29 @@ from src.attacks import (
 )
 from src.constants import *
 
-# Pull in the eval tables for incremental PeSTO evaluation
-from src.evaluation import _EG_TABLE_NP, _GAMEPHASE_INC_NP, _MG_TABLE_NP
+# Pull in the eval tables for incremental PeSTO evaluation.
+from src.evaluation import (
+    ADJACENT_FILE_MASKS,
+    BISHOP_PAIR_EG,
+    BISHOP_PAIR_MG,
+    DOUBLED_PAWN_EG,
+    DOUBLED_PAWN_MG,
+    FILE_MASKS,
+    FORWARD_FILE_MASKS,
+    GAMEPHASE_SUM,
+    ISOLATED_PAWN_EG,
+    ISOLATED_PAWN_MG,
+    PASSED_PAWN_MASKS,
+    ROOK_OPEN_EG,
+    ROOK_OPEN_MG,
+    ROOK_SEMI_OPEN_EG,
+    ROOK_SEMI_OPEN_MG,
+    _EG_TABLE_NP,
+    _GAMEPHASE_INC_NP,
+    _MG_TABLE_NP,
+    _PASSED_PAWN_EG_NP,
+    _PASSED_PAWN_MG_NP,
+)
 from src.zobrist import (
     NB_CASTLING_TABLE,
     NB_EP_CANDIDATE_MASKS,
@@ -67,9 +88,6 @@ def _add_piece(state: np.ndarray, sq: int, piece: int, color: int) -> None:
     state[piece] |= sq_bb
     state[C_WHITE + color] |= sq_bb
 
-    if piece == BISHOP:
-        state[BISHOP_COUNT_W + color] += 1
-
     state[MG_SCORE_W + color] += _MG_TABLE_NP[color, piece, sq]
     state[EG_SCORE_W + color] += _EG_TABLE_NP[color, piece, sq]
     state[GAME_PHASE] += _GAMEPHASE_INC_NP[piece]
@@ -81,9 +99,6 @@ def _clear_piece(state: np.ndarray, sq: int, piece: int, color: int) -> None:
     sq_bb = ~(np.uint64(1) << np.uint64(sq))
     state[piece] &= sq_bb
     state[C_WHITE + color] &= sq_bb
-
-    if piece == BISHOP:
-        state[BISHOP_COUNT_W + color] -= 1
 
     state[MG_SCORE_W + color] -= _MG_TABLE_NP[color, piece, sq]
     state[EG_SCORE_W + color] -= _EG_TABLE_NP[color, piece, sq]
@@ -154,7 +169,9 @@ def make_move(state: np.ndarray, undo_stack: np.ndarray, ply: int, move: int) ->
     flags = (move >> 12) & 0xF
 
     moving_piece = piece_type_at(state, from_sq)
-    captured_piece = piece_type_at(state, to_sq)
+    captured_piece = -1
+    if flags & CAPTURE and flags != EN_PASSANT:
+        captured_piece = piece_type_at(state, to_sq)
 
     # Remove old EP hash if it was active
     ep_sq = state[EP_SQUARE]
@@ -213,8 +230,6 @@ def make_move(state: np.ndarray, undo_stack: np.ndarray, ply: int, move: int) ->
 
     state[TURN] = them
     state[HASH] ^= NB_TURN_KEY
-    if us == BLACK:
-        state[FULLMOVE] += 1
 
 
 @njit(cache=False)
@@ -237,11 +252,9 @@ def make_null_move(state: np.ndarray, undo_stack: np.ndarray, ply: int) -> None:
             state[HASH] ^= NB_EP_KEYS[ep_sq & 7]
         state[EP_SQUARE] = 64
 
-    state[HALFMOVE] += 1
     state[TURN] = them
     state[HASH] ^= NB_TURN_KEY
-    if us == BLACK:
-        state[FULLMOVE] += 1
+    state[NULL_SEARCH] = 1
 
 
 @njit(cache=False)
@@ -288,15 +301,78 @@ def is_in_check(state: np.ndarray) -> bool:
 
 
 @njit(cache=False)
+def _structural_bonus(state: np.ndarray, color: int) -> tuple[int, int]:
+    own_pieces = state[C_WHITE + color]
+    own_pawns = state[P_PAWN] & own_pieces
+    enemy_pawns = state[P_PAWN] & state[C_WHITE + (1 - color)]
+    bishops = state[P_BISHOP] & own_pieces
+
+    mg_bonus = 0
+    eg_bonus = 0
+    if bishops and bishops & (bishops - np.uint64(1)):
+        mg_bonus += BISHOP_PAIR_MG
+        eg_bonus += BISHOP_PAIR_EG
+
+    pawns = own_pawns
+    while pawns:
+        pawn = pawns & (~pawns + np.uint64(1))
+        square = lsb_sq(pawn)
+        pawns &= pawns - np.uint64(1)
+        file_index = square & 7
+
+        if not own_pawns & ADJACENT_FILE_MASKS[file_index]:
+            mg_bonus -= ISOLATED_PAWN_MG
+            eg_bonus -= ISOLATED_PAWN_EG
+
+        if own_pawns & FORWARD_FILE_MASKS[color, square]:
+            mg_bonus -= DOUBLED_PAWN_MG
+            eg_bonus -= DOUBLED_PAWN_EG
+        elif not enemy_pawns & PASSED_PAWN_MASKS[color, square]:
+            relative_rank = np.int64(square) >> np.int64(3)
+            if color != WHITE:
+                relative_rank = np.int64(7) - relative_rank
+            mg_bonus += _PASSED_PAWN_MG_NP[relative_rank]
+            eg_bonus += _PASSED_PAWN_EG_NP[relative_rank]
+
+    rooks = state[P_ROOK] & own_pieces
+    while rooks:
+        rook = rooks & (~rooks + np.uint64(1))
+        square = lsb_sq(rook)
+        rooks &= rooks - np.uint64(1)
+        file_mask = FILE_MASKS[square & 7]
+        if not own_pawns & file_mask:
+            if enemy_pawns & file_mask:
+                mg_bonus += ROOK_SEMI_OPEN_MG
+                eg_bonus += ROOK_SEMI_OPEN_EG
+            else:
+                mg_bonus += ROOK_OPEN_MG
+                eg_bonus += ROOK_OPEN_EG
+
+    return mg_bonus, eg_bonus
+
+
+@njit(cache=False)
 def evaluate(state: np.ndarray) -> int:
     us = int(state[TURN])
     them = 1 - us
-    mg = np.int64(state[MG_SCORE_W + us]) - np.int64(state[MG_SCORE_W + them])
-    eg = np.int64(state[EG_SCORE_W + us]) - np.int64(state[EG_SCORE_W + them])
-    phase = min(int(state[GAME_PHASE]), 24)
-    eg_phase = 24 - phase
+    us_mg_bonus, us_eg_bonus = _structural_bonus(state, us)
+    them_mg_bonus, them_eg_bonus = _structural_bonus(state, them)
+    mg = (
+        np.int64(state[MG_SCORE_W + us])
+        + us_mg_bonus
+        - np.int64(state[MG_SCORE_W + them])
+        - them_mg_bonus
+    )
+    eg = (
+        np.int64(state[EG_SCORE_W + us])
+        + us_eg_bonus
+        - np.int64(state[EG_SCORE_W + them])
+        - them_eg_bonus
+    )
+    phase = min(int(state[GAME_PHASE]), GAMEPHASE_SUM)
+    eg_phase = GAMEPHASE_SUM - phase
     score = mg * phase + eg * eg_phase
-    return int(score // 24 if score >= 0 else -((-score) // 24))
+    return int(score // GAMEPHASE_SUM if score >= 0 else -((-score) // GAMEPHASE_SUM))
 
 
 @njit(cache=False)
@@ -447,7 +523,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     else:
         check_mask = np.uint64(0xFFFFFFFFFFFFFFFF)
 
-    pin_mask = np.full(64, 0xFFFFFFFFFFFFFFFF, dtype=np.uint64)
+    pin_mask = np.empty(64, dtype=np.uint64)
     pinned_pieces = np.uint64(0)
 
     pinners = (bishop_attacks(king_sq, other_pieces) & opp_diag) | (
@@ -479,7 +555,9 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         from_sq = lsb_sq(lsb)
         pawns &= pawns - np.uint64(1)
 
-        target_mask = movable_mask & pin_mask[from_sq]
+        target_mask = movable_mask
+        if pinned_pieces & lsb:
+            target_mask &= pin_mask[from_sq]
         file = from_sq & 7
         rank = from_sq >> 3
 
@@ -619,11 +697,11 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         lsb = knights & (~knights + np.uint64(1))
         from_sq = lsb_sq(lsb)
         knights &= knights - np.uint64(1)
-        targets = (
-            NB_KNIGHT_ATTACKS[from_sq]
-            & movable_mask
-            & pin_mask[from_sq]
-            & (other_pieces if captures_only else ~own_pieces)
+        target_mask = movable_mask
+        if pinned_pieces & lsb:
+            target_mask &= pin_mask[from_sq]
+        targets = NB_KNIGHT_ATTACKS[from_sq] & target_mask & (
+            other_pieces if captures_only else ~own_pieces
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
@@ -638,11 +716,11 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         lsb = bishops & (~bishops + np.uint64(1))
         from_sq = lsb_sq(lsb)
         bishops &= bishops - np.uint64(1)
-        targets = (
-            bishop_attacks(from_sq, occupied)
-            & movable_mask
-            & pin_mask[from_sq]
-            & (other_pieces if captures_only else ~own_pieces)
+        target_mask = movable_mask
+        if pinned_pieces & lsb:
+            target_mask &= pin_mask[from_sq]
+        targets = bishop_attacks(from_sq, occupied) & target_mask & (
+            other_pieces if captures_only else ~own_pieces
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
@@ -657,11 +735,11 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         lsb = rooks & (~rooks + np.uint64(1))
         from_sq = lsb_sq(lsb)
         rooks &= rooks - np.uint64(1)
-        targets = (
-            rook_attacks(from_sq, occupied)
-            & movable_mask
-            & pin_mask[from_sq]
-            & (other_pieces if captures_only else ~own_pieces)
+        target_mask = movable_mask
+        if pinned_pieces & lsb:
+            target_mask &= pin_mask[from_sq]
+        targets = rook_attacks(from_sq, occupied) & target_mask & (
+            other_pieces if captures_only else ~own_pieces
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
@@ -676,11 +754,11 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         lsb = queens & (~queens + np.uint64(1))
         from_sq = lsb_sq(lsb)
         queens &= queens - np.uint64(1)
-        targets = (
-            queen_attacks(from_sq, occupied)
-            & movable_mask
-            & pin_mask[from_sq]
-            & (other_pieces if captures_only else ~own_pieces)
+        target_mask = movable_mask
+        if pinned_pieces & lsb:
+            target_mask &= pin_mask[from_sq]
+        targets = queen_attacks(from_sq, occupied) & target_mask & (
+            other_pieces if captures_only else ~own_pieces
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))

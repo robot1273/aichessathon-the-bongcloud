@@ -1221,10 +1221,10 @@ class Board:
         if count == 2:
             return any(
                 self.history[idx] == curr_hash
-                for idx in range(len(self.history) - 2, limit - 1, -2)
+                for idx in range(len(self.history) - 3, limit - 1, -2)
             )
         seen = 1
-        for idx in range(len(self.history) - 2, limit - 1, -2):
+        for idx in range(len(self.history) - 3, limit - 1, -2):
             if self.history[idx] == curr_hash:
                 seen += 1
                 if seen >= count:
@@ -1237,21 +1237,22 @@ class Board:
     def is_insufficient_material(self) -> bool:
         if self.pieces[PAWN] or self.pieces[ROOK] or self.pieces[QUEEN]:
             return False
-        # Only kings, knights, and bishops
-        w_minors = (self.pieces[KNIGHT] | self.pieces[BISHOP]) & self.colours[WHITE]
-        b_minors = (self.pieces[KNIGHT] | self.pieces[BISHOP]) & self.colours[BLACK]
-        w_count = w_minors.bit_count()
-        b_count = b_minors.bit_count()
-        return (
-            (w_count == 0 and b_count == 0)
-            or (w_count == 1 and b_count == 0)
-            or (w_count == 0 and b_count == 1)
-        )
+
+        knights = self.pieces[KNIGHT]
+        bishops = self.pieces[BISHOP]
+        if knights:
+            return not bishops and knights.bit_count() == 1
+        if not bishops:
+            return True
+
+        light_squares = 0x55AA55AA55AA55AA
+        dark_squares = 0xAA55AA55AA55AA55
+        return not (bishops & light_squares) or not (bishops & dark_squares)
 
     def is_game_over(self) -> bool:
-        if self.is_halfmove_draw() or self.is_insufficient_material() or self.is_repetition(3):
+        if not self.generate_moves():
             return True
-        return len(self.generate_moves()) == 0
+        return self.is_halfmove_draw() or self.is_insufficient_material() or self.is_repetition(3)
 
     def fen(self) -> str:
         """Export current position as standard FEN string."""

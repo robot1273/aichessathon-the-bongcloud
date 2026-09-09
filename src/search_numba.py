@@ -27,19 +27,15 @@ from src.board_primitives import (
 )
 from src.constants import (
     BISHOP,
-    BISHOP_COUNT_B,
-    BISHOP_COUNT_W,
     BLACK,
+    CAPTURE,
     C_BLACK,
     C_WHITE,
     CASTLING,
-    EG_BONUS_B,
-    EG_BONUS_W,
     EG_SCORE_B,
     EG_SCORE_W,
     EN_PASSANT,
     EP_SQUARE,
-    FULLMOVE,
     GAME_PHASE,
     HALFMOVE,
     HASH,
@@ -50,11 +46,10 @@ from src.constants import (
     MATE_SCORE,
     MATE_THRESHOLD,
     MAX_PLY,
-    MG_BONUS_B,
-    MG_BONUS_W,
     MG_SCORE_B,
     MG_SCORE_W,
     NO_MOVE,
+    NULL_SEARCH,
     P_BISHOP,
     P_KING,
     P_KNIGHT,
@@ -90,6 +85,23 @@ _MVV_LVA = np.array(MVV_LVA, dtype=np.int32)
 
 
 @njit(cache=False)
+def is_insufficient_material(state: np.ndarray) -> bool:
+    if state[P_PAWN] or state[P_ROOK] or state[P_QUEEN]:
+        return False
+
+    knights = state[P_KNIGHT]
+    bishops = state[P_BISHOP]
+    if knights:
+        return not bishops and not (knights & (knights - np.uint64(1)))
+    if not bishops:
+        return True
+
+    light_squares = np.uint64(0x55AA55AA55AA55AA)
+    dark_squares = np.uint64(0xAA55AA55AA55AA55)
+    return not (bishops & light_squares) or not (bishops & dark_squares)
+
+
+@njit(cache=False)
 def is_draw(
     state: np.ndarray,
     undo_stack: np.ndarray,
@@ -97,6 +109,10 @@ def is_draw(
     hash_history: np.ndarray,
     hist_len: int,
 ) -> bool:
+    if is_insufficient_material(state):
+        return True
+    if state[NULL_SEARCH]:
+        return False
     if state[HALFMOVE] >= 100:
         return True
 
@@ -143,12 +159,9 @@ def score_move(
     to_sq = (move >> 6) & 0x3F
     flags = (move >> 12) & 0xF
 
-    moving_piece = piece_type_at(state, from_sq)
-    captured_piece = piece_type_at(state, to_sq)
-
-    if captured_piece != -1 or flags == EN_PASSANT:
-        if flags == EN_PASSANT:
-            captured_piece = PAWN
+    if flags & CAPTURE:
+        moving_piece = piece_type_at(state, from_sq)
+        captured_piece = PAWN if flags == EN_PASSANT else piece_type_at(state, to_sq)
         return 1000000000 + int(_MVV_LVA[captured_piece, moving_piece])
 
     if flags >= KNIGHT_PROMO:
@@ -192,12 +205,9 @@ def score_captures(
         to_sq = (move >> 6) & 0x3F
         flags = (move >> 12) & 0xF
 
-        moving_piece = piece_type_at(state, from_sq)
-        captured_piece = piece_type_at(state, to_sq)
-
-        if captured_piece != -1 or flags == EN_PASSANT:
-            if flags == EN_PASSANT:
-                captured_piece = PAWN
+        if flags & CAPTURE:
+            moving_piece = piece_type_at(state, from_sq)
+            captured_piece = PAWN if flags == EN_PASSANT else piece_type_at(state, to_sq)
             scores[i] = 1000000000 + _MVV_LVA[captured_piece, moving_piece]
         elif flags >= KNIGHT_PROMO:
             scores[i] = 900000000 + flags
@@ -229,8 +239,15 @@ def quiescence(
         return evaluate(state)
 
     in_check = is_in_check(state)
-    stand_pat = -INF
+    if (state[HALFMOVE] >= 100 and not state[NULL_SEARCH]) or is_insufficient_material(state):
+        if not in_check:
+            return 0
+        moves = moves_stack[ply]
+        if generate_moves(state, moves, captures_only=False) == 0:
+            return -MATE_SCORE + ply
+        return 0
 
+    stand_pat = -INF
     if not in_check:
         stand_pat = evaluate(state)
         if stand_pat >= beta:
@@ -240,6 +257,16 @@ def quiescence(
 
     moves = moves_stack[ply]
     num_moves = generate_moves(state, moves, captures_only=not in_check)
+    if not in_check and num_moves == 0:
+        non_kings = (state[C_WHITE] | state[C_BLACK]) & ~state[P_KING]
+        piece_count = 0
+        while non_kings and piece_count <= 3:
+            non_kings &= non_kings - np.uint64(1)
+            piece_count += 1
+        if (piece_count <= 3 or abs(stand_pat) >= 800) and generate_moves(
+            state, moves, captures_only=False
+        ) == 0:
+            return 0
     scores = scores_stack[ply]
     score_captures(state, moves, num_moves, scores)
 
@@ -317,12 +344,27 @@ def alpha_beta(
     if stats[1] == 1:
         return 0
 
-    # Draw checks
+    in_check = is_in_check(state)
+    if in_check and ply < MAX_PLY - 2 and extensions < 4:
+        depth += 1
+        extensions += 1
+
+    # Checkmate takes precedence over claimed draws.
     if ply > 0 and is_draw(state, undo_stack, ply, hash_history, hist_len):
+        if in_check:
+            moves = moves_stack[ply]
+            if generate_moves(state, moves, captures_only=False) == 0:
+                return -MATE_SCORE + ply
         return 0
 
     if ply >= MAX_PLY - 1:
         return evaluate(state)
+
+    # Mate-distance pruning narrows forced-mate subtrees without changing scores.
+    alpha = max(alpha, -MATE_SCORE + ply)
+    beta = min(beta, MATE_SCORE - ply - 1)
+    if alpha >= beta:
+        return alpha
 
     is_pv = beta - alpha > 1
     hash_val = state[HASH]
@@ -340,11 +382,6 @@ def alpha_beta(
             return beta
         if tt_bound_val == BOUND_UPPER and adjusted_score <= alpha:
             return alpha
-
-    in_check = is_in_check(state)
-    if in_check and ply < MAX_PLY - 2 and extensions < 4:
-        depth += 1
-        extensions += 1
 
     if depth <= 0:
         return int(
@@ -411,7 +448,7 @@ def alpha_beta(
             return 0
 
         if null_score >= beta:
-            return beta if null_score < MATE_THRESHOLD else null_score
+            return beta
 
     moves = moves_stack[ply]
     num_moves = generate_moves(state, moves, captures_only=False)
@@ -431,9 +468,7 @@ def alpha_beta(
         to_sq = (move >> 6) & 0x3F
         flags = (move >> 12) & 0xF
 
-        is_tactical = (
-            piece_type_at(state, to_sq) != -1 or flags == EN_PASSANT or flags >= KNIGHT_PROMO
-        )
+        is_tactical = bool(flags & CAPTURE or flags >= KNIGHT_PROMO)
 
         # Futility Pruning: verify arithmetic margin before expensive raycast
         if (
@@ -602,11 +637,7 @@ def alpha_beta(
                             prev_m = moves[j]
                             prev_to = (prev_m >> 6) & 0x3F
                             prev_flags = (prev_m >> 12) & 0xF
-                            if (
-                                piece_type_at(state, prev_to) == -1
-                                and prev_flags != EN_PASSANT
-                                and prev_flags < KNIGHT_PROMO
-                            ):
+                            if not prev_flags & CAPTURE and prev_flags < KNIGHT_PROMO:
                                 prev_from = prev_m & 0x3F
                                 prev_cur = history[us, prev_from, prev_to]
                                 history[us, prev_from, prev_to] = (
@@ -717,9 +748,7 @@ def search_root(
         to_sq = (move >> 6) & 0x3F
         flags = (move >> 12) & 0xF
 
-        is_tactical = (
-            piece_type_at(state, to_sq) != -1 or flags == EN_PASSANT or flags >= KNIGHT_PROMO
-        )
+        is_tactical = bool(flags & CAPTURE or flags >= KNIGHT_PROMO)
 
         make_move(state, undo_stack, 0, move)
         legal_moves += 1
@@ -874,11 +903,7 @@ def search_root(
                         prev_m = moves[j]
                         prev_to = (prev_m >> 6) & 0x3F
                         prev_flags = (prev_m >> 12) & 0xF
-                        if (
-                            piece_type_at(state, prev_to) == -1
-                            and prev_flags != EN_PASSANT
-                            and prev_flags < KNIGHT_PROMO
-                        ):
+                        if not prev_flags & CAPTURE and prev_flags < KNIGHT_PROMO:
                             prev_from = prev_m & 0x3F
                             prev_cur = history[us, prev_from, prev_to]
                             history[us, prev_from, prev_to] = (
@@ -1016,7 +1041,6 @@ def board_to_state(board: "Board") -> np.ndarray:
     state[CASTLING] = np.uint64(board.castling)
     state[EP_SQUARE] = np.uint64(board.ep_square if board.ep_square != -1 else 64)
     state[HALFMOVE] = np.uint64(board.halfmove)
-    state[FULLMOVE] = np.uint64(board.fullmove)
 
     state[HASH] = np.uint64(board.hash)
 
@@ -1026,13 +1050,5 @@ def board_to_state(board: "Board") -> np.ndarray:
     state[EG_SCORE_B] = np.uint64(board.eg_score[BLACK] & 0xFFFFFFFFFFFFFFFF)
 
     state[GAME_PHASE] = np.uint64(board.game_phase)
-
-    state[BISHOP_COUNT_W] = np.uint64(board.bishop_count[WHITE])
-    state[BISHOP_COUNT_B] = np.uint64(board.bishop_count[BLACK])
-
-    state[MG_BONUS_W] = np.uint64(board.mg_bonus[WHITE] & 0xFFFFFFFFFFFFFFFF)
-    state[EG_BONUS_W] = np.uint64(board.eg_bonus[WHITE] & 0xFFFFFFFFFFFFFFFF)
-    state[MG_BONUS_B] = np.uint64(board.mg_bonus[BLACK] & 0xFFFFFFFFFFFFFFFF)
-    state[EG_BONUS_B] = np.uint64(board.eg_bonus[BLACK] & 0xFFFFFFFFFFFFFFFF)
 
     return state

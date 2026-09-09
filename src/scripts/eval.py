@@ -410,7 +410,7 @@ def main() -> None:
     parser.add_argument("--stockfish", default="stockfish", help="Path to Stockfish binary")
     parser.add_argument("--games", type=int, default=12, help="Number of games to play")
     parser.add_argument("--skill", type=int, default=3, help="Initial Stockfish skill level (0-20)")
-    parser.add_argument("--base-time", type=int, default=9000, help="Base time per game (ms)")
+    parser.add_argument("--base-time", type=int, default=12000, help="Base time per game (ms)")
     parser.add_argument("--inc", type=int, default=50, help="Time increment per move (ms)")
     parser.add_argument(
         "--workers", type=int, default=1, help="Parallel games for fixed-skill evaluation"
