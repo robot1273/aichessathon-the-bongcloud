@@ -229,6 +229,7 @@ class Bot:
         prev_score: int,
         root_hash: int,
     ) -> tuple[int, chess.Move | None]:
+        self.nodes += 1
         if depth < ASP_MIN_DEPTH:
             return self._pvs_root(board, root_moves, depth, -INF, INF, root_hash)
 
