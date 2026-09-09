@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup play arena zip gate test profile_nps profile
+.PHONY: setup play arena zip gate test profile_nps profile eval
 
 setup:
 	uv sync
@@ -30,3 +30,6 @@ profile_nps:
 
 profile:
 	uv run python -m src.scripts.profile_funcs $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(TOP),--top "$(TOP)") $(if $(SORT),--sort "$(SORT)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)
+
+eval:
+	uv run python -m src.scripts.eval $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)
