@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup play arena zip gate profile_nps profile
+.PHONY: setup play arena zip gate test profile_nps profile
 
 setup:
 	uv sync
@@ -17,7 +17,11 @@ zip:
 gate:
 	uv run ruff check .
 	uv run mypy
+	uv run python -m unittest discover -s tests
 	uv run python -m harness.arena --opponent baselines/random --games 2 --base-ms 5000
+
+test:
+	uv run python -m unittest discover -s tests
 
 profile_nps:
 	uv run python -m src.scripts.profile_nps $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)

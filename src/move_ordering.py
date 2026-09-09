@@ -11,8 +11,7 @@ KILLER_SCORE_2: Final[int] = 49_000
 MAX_PLY: Final[int] = 128
 
 MVV_LVA: Final[tuple[tuple[int, ...], ...]] = tuple(
-    tuple(PIECE_VALUES[v] * 10 - PIECE_VALUES[a] for a in range(7))
-    for v in range(7)
+    tuple(PIECE_VALUES[v] * 10 - PIECE_VALUES[a] for a in range(7)) for v in range(7)
 )
 
 
@@ -20,9 +19,7 @@ class KillerTable:
     __slots__ = ("_table",)
 
     def __init__(self) -> None:
-        self._table: list[list[chess.Move | None]] = [
-            [None, None] for _ in range(MAX_PLY)
-        ]
+        self._table: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY)]
 
     def store(self, ply: int, move: chess.Move) -> None:
         if ply >= MAX_PLY:
@@ -49,9 +46,7 @@ class HistoryTable:
     __slots__ = ("_table",)
 
     def __init__(self) -> None:
-        self._table: list[list[list[int]]] = [
-            [[0] * 64 for _ in range(64)] for _ in range(2)
-        ]
+        self._table: list[list[list[int]]] = [[[0] * 64 for _ in range(64)] for _ in range(2)]
 
     def update(self, color: bool, move: chess.Move, depth: int) -> None:
         c = 0 if color else 1
@@ -86,30 +81,32 @@ def order_moves(
     k1, k2 = killers.get(ply) if killers is not None else (None, None)
     turn = board.turn
     ep_square = board.ep_square
-    scored: list[tuple[int, chess.Move]] = []
-    for move in moves:
-        if move == tt_move:
-            score = TT_MOVE_SCORE
-        elif move.promotion:
-            score = PROMOTION_SCORE + (9000 if move.promotion == chess.QUEEN else 2000)
-        elif board.is_capture(move):
-            victim = (
-                chess.PAWN
-                if move.to_square == ep_square
-                else board.piece_type_at(move.to_square)
-            )
-            attacker = board.piece_type_at(move.from_square)
-            score = CAPTURE_SCORE_BASE + MVV_LVA[victim or chess.PAWN][attacker or chess.PAWN]
-        elif move == k1:
-            score = KILLER_SCORE_1
-        elif move == k2:
-            score = KILLER_SCORE_2
-        elif history is not None:
-            score = history.get(turn, move)
-        else:
-            score = 0
-        scored.append((score, move))
+    occupied = board.occupied
+    pawns = board.pawns
+    squares = chess.BB_SQUARES
+    piece_type_at = board.piece_type_at
+    mvv_lva = MVV_LVA
+    history_scores = history._table[0 if turn else 1] if history is not None else None
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    moves[:] = [move for _, move in scored]
+    def score(move: chess.Move) -> int:
+        if tt_move is not None and move == tt_move:
+            return TT_MOVE_SCORE
+        if move.promotion:
+            return PROMOTION_SCORE + (9000 if move.promotion == chess.QUEEN else 2000)
+
+        from_square = move.from_square
+        to_square = move.to_square
+        if occupied & squares[to_square] or (
+            to_square == ep_square and pawns & squares[from_square]
+        ):
+            victim = chess.PAWN if to_square == ep_square else piece_type_at(to_square)
+            attacker = piece_type_at(from_square)
+            return CAPTURE_SCORE_BASE + mvv_lva[victim or chess.PAWN][attacker or chess.PAWN]
+        if k1 is not None and move == k1:
+            return KILLER_SCORE_1
+        if k2 is not None and move == k2:
+            return KILLER_SCORE_2
+        return history_scores[from_square][to_square] if history_scores is not None else 0
+
+    moves.sort(key=score, reverse=True)
     return moves

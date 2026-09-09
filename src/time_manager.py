@@ -1,12 +1,10 @@
-"""Dynamic time allocation for the chess engine."""
-
 from __future__ import annotations
 
 import time
 
 import chess
 
-from .evaluation import Evaluator
+from .evaluation import evaluate_with_phase
 
 
 class TimeManager:
@@ -19,8 +17,8 @@ class TimeManager:
         self._start: float = 0.0
         self._soft_limit: float = 0.0
         self._hard_limit: float = 0.0
-        self._stopped: bool = True
         self._is_fixed_time: bool = False
+        self._usable: float = 0.0
 
     def start(
         self,
@@ -30,19 +28,19 @@ class TimeManager:
     ) -> None:
         """Begin the clock for one move."""
         self._start = time.monotonic()
-        self._stopped = False
 
         if movetime_ms is not None:
             self._is_fixed_time = True
-            usable = max(movetime_ms / 1000.0, 0.001)
-            # For fixed move time: stop starting new iterations at 80% time, hard cutoff at 100%
+            usable = max(movetime_ms / 1000.0 - 0.002, 0.001)
+            self._usable = usable
             self._soft_limit = usable * 0.80
             self._hard_limit = usable
             return
 
         self._is_fixed_time = False
         usable = max(time_left_ms / 1000.0 - self.SAFETY_S, 0.01)
-        _, phase = Evaluator.evaluate_with_phase(board)
+        self._usable = usable
+        _, phase = evaluate_with_phase(board)
         base = self._base_time(usable, board.fullmove_number, phase)
 
         self._soft_limit = min(base, usable * 0.20)
@@ -57,11 +55,8 @@ class TimeManager:
         swing = abs(curr_score - prev_score)
         if swing >= 50:
             factor = min(1.0 + swing / 200.0, 1.8)
-            self._soft_limit *= factor
-            self._hard_limit *= factor
-
-    def stop(self) -> None:
-        self._stopped = True
+            self._soft_limit = min(self._soft_limit * factor, self._usable * 0.20)
+            self._hard_limit = min(self._hard_limit * factor, self._usable * 0.30)
 
     @property
     def soft_limit(self) -> float:
@@ -75,13 +70,9 @@ class TimeManager:
         return time.monotonic() - self._start
 
     def is_time_up(self) -> bool:
-        if self._stopped:
-            return True
         return self.elapsed() >= self._hard_limit
 
     def should_stop_iterating(self) -> bool:
-        if self._stopped:
-            return True
         return self.elapsed() >= self._soft_limit
 
     # ------------------------------------------------------------------
@@ -90,7 +81,7 @@ class TimeManager:
     def _base_time(usable: float, move_number: int, phase: float) -> float:
         """Compute the raw time budget for this move."""
         expected_remaining = 20.0 + 25.0 * phase
-        base = usable / expected_remaining
+        base = usable / expected_remaining + TimeManager.INCREMENT_S * 0.8
         if 5 <= move_number <= 25:
             base *= 1.25
         return base

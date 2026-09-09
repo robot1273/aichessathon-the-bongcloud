@@ -269,41 +269,34 @@ def _evaluate_kernel(
     return final_score, int(mg_phase)
 
 
-class Evaluator:
-    """Main evaluation class."""
-
-    _kernel = staticmethod(_evaluate_kernel)
-
-    @classmethod
-    def _call_kernel(cls, board: chess.Board) -> tuple[int, int]:
-        return cls._kernel(
-            np.uint64(board.pawns),
-            np.uint64(board.knights),
-            np.uint64(board.bishops),
-            np.uint64(board.rooks),
-            np.uint64(board.queens),
-            np.uint64(board.kings),
-            np.uint64(board.occupied_co[chess.WHITE]),
-            np.uint64(board.occupied_co[chess.BLACK]),
-            board.turn == chess.WHITE,
-        )
-
-    @classmethod
-    def evaluate(cls, board: chess.Board) -> int:
-        """Evaluate a chess position using PeSTO evaluation."""
-        score, _ = cls._call_kernel(board)
-        return score
-
-    @classmethod
-    def evaluate_with_phase(cls, board: chess.Board) -> tuple[int, float]:
-        """Return (score, game_phase) where phase is 0.0 (endgame) to 1.0 (opening)."""
-        score, raw_phase = cls._call_kernel(board)
-        return score, raw_phase / GAMEPHASE_SUM
-
-    @classmethod
-    def warmup_evaluator(cls) -> None:
-        """Compile and warm up the evaluator."""
-        cls.evaluate(chess.Board())
+def evaluate(board: chess.Board) -> int:
+    score, _ = _evaluate_kernel(
+        np.uint64(board.pawns),
+        np.uint64(board.knights),
+        np.uint64(board.bishops),
+        np.uint64(board.rooks),
+        np.uint64(board.queens),
+        np.uint64(board.kings),
+        np.uint64(board.occupied_co[chess.WHITE]),
+        np.uint64(board.occupied_co[chess.BLACK]),
+        board.turn == chess.WHITE,
+    )
+    return score
 
 
-Evaluator.warmup_evaluator()
+def evaluate_with_phase(board: chess.Board) -> tuple[int, float]:
+    score, raw_phase = _evaluate_kernel(
+        np.uint64(board.pawns),
+        np.uint64(board.knights),
+        np.uint64(board.bishops),
+        np.uint64(board.rooks),
+        np.uint64(board.queens),
+        np.uint64(board.kings),
+        np.uint64(board.occupied_co[chess.WHITE]),
+        np.uint64(board.occupied_co[chess.BLACK]),
+        board.turn == chess.WHITE,
+    )
+    return score, raw_phase / GAMEPHASE_SUM
+
+
+evaluate(chess.Board())

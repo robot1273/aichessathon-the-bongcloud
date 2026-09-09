@@ -19,7 +19,7 @@ class BenchmarkResult:
     move: chess.Move
     nodes: int
     elapsed: float
-    stats: SearchStats
+    stats: SearchStats | None
 
     @property
     def nps(self) -> int:
@@ -92,7 +92,8 @@ def run_benchmark(
             f"| Time: {result.elapsed:.3f}s "
             f"| NPS: {result.nps:,}"
         )
-        print_stats(result.stats)
+        if result.stats is not None:
+            print_stats(result.stats)
 
     return results
 

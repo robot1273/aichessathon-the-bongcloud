@@ -121,11 +121,7 @@ class TT:
             return
 
         # Same hash — always update if new depth >= old depth, stale, or EXACT.
-        if (
-            depth >= entry.depth
-            or (self.current_age - entry.age) > 2
-            or bound == Bound.EXACT
-        ):
+        if depth >= entry.depth or (self.current_age - entry.age) > 2 or bound == Bound.EXACT:
             # Preserve the best move if the new search didn't find one.
             if best_move is None:
                 best_move = entry.best_move

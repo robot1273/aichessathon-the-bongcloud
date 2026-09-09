@@ -39,6 +39,4 @@ def get_positions(
         return matches
 
     available = ", ".join(f"'{p[0]}'" for p in BENCHMARK_POSITIONS)
-    raise ValueError(
-        f"Unknown position '{position_arg}'. Available positions: {available}"
-    )
+    raise ValueError(f"Unknown position '{position_arg}'. Available positions: {available}")

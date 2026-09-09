@@ -8,10 +8,7 @@ _ARR: Final[list[int]] = chess.polyglot.POLYGLOT_RANDOM_ARRAY
 
 # Pre-indexed by white then black, unlike python-chess's black-then-white bitboards.
 PIECE_KEYS: Final[tuple[tuple[tuple[int, ...], ...], ...]] = tuple(
-    tuple(
-        tuple(_ARR[64 * ((p - 1) * 2 + (1 - c)) + sq] for sq in range(64))
-        for p in range(1, 7)
-    )
+    tuple(tuple(_ARR[64 * ((p - 1) * 2 + (1 - c)) + sq] for sq in range(64)) for p in range(1, 7))
     for c in range(2)
 )
 CASTLING_KEYS: Final[tuple[int, ...]] = tuple(_ARR[768 + i] for i in range(4))

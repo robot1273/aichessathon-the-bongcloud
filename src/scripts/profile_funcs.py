@@ -48,11 +48,9 @@ def main() -> None:
     print("=" * 86)
 
     profiler = cProfile.Profile()
-    bot = Bot()
+    bot = Bot(collect_stats=True)
     profiler.enable()
-    results = run_benchmark(
-        bot, positions, depth=depth, movetime_ms=movetime_ms, quiet=args.quiet
-    )
+    results = run_benchmark(bot, positions, depth=depth, movetime_ms=movetime_ms, quiet=args.quiet)
     profiler.disable()
 
     print_summary(results)
