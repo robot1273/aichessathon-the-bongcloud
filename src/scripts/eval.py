@@ -307,7 +307,7 @@ class AdaptiveEvaluator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adaptive Stockfish Evaluator with Time Stress Testing.")
     parser.add_argument("--stockfish-path", type=str, default="stockfish", help="Path to Stockfish binary.")
-    parser.add_argument("--games", type=int, default=15, help="Number of games to run.")
+    parser.add_argument("--games", type=int, default=100, help="Number of games to run.")
     parser.add_argument("--skill", type=int, default=4, help="Starting Stockfish Skill Level (0-20).")
 
     # Stress-test presets

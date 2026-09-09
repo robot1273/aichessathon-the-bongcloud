@@ -33,7 +33,7 @@ def main() -> None:
     movetime_ms = args.time_ms
     if movetime_ms is None and args.time is not None:
         movetime_ms = int(args.time * 1000)
-    depth = args.depth if args.depth is not None or movetime_ms is not None else 4
+    depth = args.depth if args.depth is not None or movetime_ms is not None else 6
 
     try:
         positions = get_positions(position_arg=args.position, fen_arg=args.fen)

@@ -284,7 +284,7 @@ class Bot:
                 )
             )
             new_hash = push_hash(board, move, root_hash)
-            child_in_check = bool(board.checkers_mask())
+            child_in_check = board.is_check()
 
 
             if i == 0:
@@ -473,7 +473,7 @@ class Bot:
                 continue
 
             new_hash = push_hash(board, move, current_hash)
-            child_in_check = bool(board.checkers_mask())
+            child_in_check = board.is_check()
             new_depth = depth - 1
 
             reduction = 0
@@ -586,8 +586,11 @@ class Bot:
             self.sel_depth = ply
         if in_check is None:
             in_check = bool(board.checkers_mask())
-        if self._is_draw(board):
-            return 0
+
+        if qply >= MAX_QUIESCENCE_DEPTH + 4:
+            return evaluate(board)
+        if qply >= MAX_QUIESCENCE_DEPTH and not in_check:
+            return evaluate(board)
 
         alpha = max(alpha, -(MATE_SCORE - ply))
         beta = min(beta, MATE_SCORE - ply - 1)
@@ -610,9 +613,6 @@ class Bot:
                     or (tt_entry.bound == Bound.UPPER and tt_score <= alpha)
                 ):
                     return tt_score
-
-        if qply >= MAX_QUIESCENCE_DEPTH and not in_check:
-            return evaluate(board)
 
         if in_check:
             if self.collect_stats:
