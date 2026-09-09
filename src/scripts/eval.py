@@ -2,6 +2,7 @@ import argparse
 import math
 import time
 from dataclasses import dataclass, field
+
 import chess
 import chess.engine
 
@@ -128,7 +129,7 @@ class AdaptiveEvaluator:
 
     def _play_game(self, game_id: int, bot_color: chess.Color) -> GameResult:
         board = chess.Board()
-        bot = Bot(increment_override_s=self.inc_ms / 1000)
+        bot = Bot(increment_s=self.inc_ms / 1000)
 
         bot_clock = float(self.base_time_ms)
         sf_clock = float(self.base_time_ms)
@@ -310,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("--skill", type=int, default=3, help="Starting Stockfish Skill Level (0-20).")
 
     # Stress-test presets
-    parser.add_argument("--stress_test", choices=["bullet", "sudden_death", "std"], default="bullet", help="Time stress test mode")
+    parser.add_argument("--stress_test", choices=["bullet", "sudden_death", "std"], default="std", help="Time stress test mode")
 
     args = parser.parse_args()
 
@@ -320,7 +321,7 @@ if __name__ == "__main__":
     elif args.stress_test == "sudden_death":
         base_ms, inc_ms = 2000, 0
     elif args.stress_test == "std":
-        base_ms, inc_ms = 60000, 500 # 1m 0.5s increment
+        base_ms, inc_ms = 120_000, 500 # 2m 0.5s increment
 
     evaluator = AdaptiveEvaluator(
         stockfish_path=args.stockfish_path,
