@@ -190,6 +190,65 @@ GAMEPHASE_SUM: Final[int] = int(
     sum(inc * count * 2 for inc, count in zip(GAMEPHASE_INC, (8, 2, 2, 2, 1, 1), strict=True))
 )  # 5560
 
+BISHOP_PAIR_MG: Final[int] = 20
+BISHOP_PAIR_EG: Final[int] = 30
+ISOLATED_PAWN_MG: Final[int] = 7
+ISOLATED_PAWN_EG: Final[int] = 10
+DOUBLED_PAWN_MG: Final[int] = 8
+DOUBLED_PAWN_EG: Final[int] = 12
+ROOK_SEMI_OPEN_MG: Final[int] = 5
+ROOK_SEMI_OPEN_EG: Final[int] = 3
+ROOK_OPEN_MG: Final[int] = 10
+ROOK_OPEN_EG: Final[int] = 6
+PASSED_PAWN_MG: Final[np.ndarray] = np.array((0, 0, 3, 7, 12, 20, 32, 0), dtype=np.int16)
+PASSED_PAWN_EG: Final[np.ndarray] = np.array((0, 0, 6, 12, 22, 38, 65, 0), dtype=np.int16)
+
+FILE_MASKS: Final[np.ndarray] = np.asarray(chess.BB_FILES, dtype=np.uint64)
+ADJACENT_FILE_MASKS: Final[np.ndarray] = np.asarray(
+    tuple(
+        (chess.BB_FILES[file_index - 1] if file_index > 0 else 0)
+        | (chess.BB_FILES[file_index + 1] if file_index < 7 else 0)
+        for file_index in range(8)
+    ),
+    dtype=np.uint64,
+)
+FORWARD_FILE_MASKS: Final[np.ndarray] = np.asarray(
+    tuple(
+        tuple(
+            sum(
+                1 << target
+                for target in range(64)
+                if target & 7 == square & 7
+                and (
+                    (color_index == 0 and target >> 3 > square >> 3)
+                    or (color_index == 1 and target >> 3 < square >> 3)
+                )
+            )
+            for square in range(64)
+        )
+        for color_index in range(2)
+    ),
+    dtype=np.uint64,
+)
+PASSED_PAWN_MASKS: Final[np.ndarray] = np.asarray(
+    tuple(
+        tuple(
+            sum(
+                1 << target
+                for target in range(64)
+                if abs((target & 7) - (square & 7)) <= 1
+                and (
+                    (color_index == 0 and target >> 3 > square >> 3)
+                    or (color_index == 1 and target >> 3 < square >> 3)
+                )
+            )
+            for square in range(64)
+        )
+        for color_index in range(2)
+    ),
+    dtype=np.uint64,
+)
+
 
 # fmt: off
 _DEBRUIJN64: Final = np.uint64(0x03F79D71B4CB0A89)
@@ -250,6 +309,58 @@ def _evaluate_kernel(
                 game_phase += GAMEPHASE_INC[piece_index]
 
                 bb ^= lsb
+
+        own_pawns = pawns & occupancy
+        enemy_pawns = pawns & occupancies[1 - color_index]
+        mg_bonus = 0
+        eg_bonus = 0
+
+        own_bishops = bishops & occupancy
+        if own_bishops != 0 and own_bishops & (own_bishops - np.uint64(1)) != 0:
+            mg_bonus += BISHOP_PAIR_MG
+            eg_bonus += BISHOP_PAIR_EG
+
+        bb = own_pawns
+        while bb != 0:
+            lsb = bb & (np.uint64(0) - bb)
+            square = _LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)]
+            file_index = square & 7
+            if own_pawns & ADJACENT_FILE_MASKS[file_index] == 0:
+                mg_bonus -= ISOLATED_PAWN_MG
+                eg_bonus -= ISOLATED_PAWN_EG
+
+            doubled = own_pawns & FORWARD_FILE_MASKS[color_index, square] != 0
+            if doubled:
+                mg_bonus -= DOUBLED_PAWN_MG
+                eg_bonus -= DOUBLED_PAWN_EG
+            elif enemy_pawns & PASSED_PAWN_MASKS[color_index, square] == 0:
+                relative_rank = np.int64(square) >> np.int64(3)
+                if color_index != 0:
+                    relative_rank = np.int64(7) - relative_rank
+                mg_bonus += PASSED_PAWN_MG[relative_rank]
+                eg_bonus += PASSED_PAWN_EG[relative_rank]
+            bb ^= lsb
+
+        bb = rooks & occupancy
+        while bb != 0:
+            lsb = bb & (np.uint64(0) - bb)
+            square = _LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)]
+            file_mask = FILE_MASKS[square & 7]
+            if own_pawns & file_mask == 0:
+                if enemy_pawns & file_mask:
+                    mg_bonus += ROOK_SEMI_OPEN_MG
+                    eg_bonus += ROOK_SEMI_OPEN_EG
+                else:
+                    mg_bonus += ROOK_OPEN_MG
+                    eg_bonus += ROOK_OPEN_EG
+            bb ^= lsb
+
+        if color_index == 0:
+            mg_white += mg_bonus
+            eg_white += eg_bonus
+        else:
+            mg_black += mg_bonus
+            eg_black += eg_bonus
 
     side_index = 0 if white_to_move else 1
 

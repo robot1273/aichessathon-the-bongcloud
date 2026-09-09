@@ -11,6 +11,7 @@ from .evaluation import evaluate
 from .move_ordering import (
     MVV_LVA,
     PIECE_VALUES,
+    TT_MOVE_SCORE,
     HistoryTable,
     KillerTable,
     order_moves,
@@ -338,7 +339,7 @@ class Bot:
         if self.game_positions.get(current_hash, 0) >= 2:
             return 0
         if depth <= 0:
-            return self._quiescence(board, alpha, beta, ply, in_check, 0)
+            return self._quiescence(board, alpha, beta, ply, current_hash, in_check, 0)
 
         self.nodes += 1
         if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
@@ -429,7 +430,6 @@ class Bot:
             and static_eval + FUTILITY_MARGIN_PER_DEPTH * depth <= alpha
             and abs(alpha) < MATE_THRESHOLD
         )
-
         alpha_orig = alpha
         if self.collect_stats:
             self.move_generations += 1
@@ -565,6 +565,7 @@ class Bot:
         alpha: int,
         beta: int,
         ply: int,
+        current_hash: int,
         in_check: bool | None = None,
         qply: int = 0,
     ) -> int:
@@ -585,6 +586,23 @@ class Bot:
         beta = min(beta, MATE_SCORE - ply - 1)
         if alpha >= beta:
             return alpha
+        alpha_orig = alpha
+
+        required_depth = -qply
+        tt_move: chess.Move | None = None
+        tt_static_eval: int | None = None
+        tt_entry = self.tt.probe(current_hash)
+        if tt_entry is not None:
+            tt_move = tt_entry.best_move
+            tt_static_eval = tt_entry.static_eval
+            if tt_entry.depth >= required_depth:
+                tt_score = score_from_tt(tt_entry.score, ply)
+                if (
+                    tt_entry.bound == Bound.EXACT
+                    or (tt_entry.bound == Bound.LOWER and tt_score >= beta)
+                    or (tt_entry.bound == Bound.UPPER and tt_score <= alpha)
+                ):
+                    return tt_score
 
         if qply >= MAX_QUIESCENCE_DEPTH and not in_check:
             return evaluate(board)
@@ -599,27 +617,56 @@ class Bot:
             ep_square = board.ep_square
             pawns = board.pawns
             moves.sort(
-                key=lambda move: bool(
-                    occupied & chess.BB_SQUARES[move.to_square]
-                    or (move.to_square == ep_square and pawns & chess.BB_SQUARES[move.from_square])
+                key=lambda move: (
+                    2
+                    if move == tt_move
+                    else bool(
+                        occupied & chess.BB_SQUARES[move.to_square]
+                        or (
+                            move.to_square == ep_square
+                            and pawns & chess.BB_SQUARES[move.from_square]
+                        )
+                    )
                 ),
                 reverse=True,
             )
             best_score = -INF
+            best_move: chess.Move | None = None
             for move in moves:
-                board.push(move)
-                score = -self._quiescence(board, -beta, -alpha, ply + 1, None, qply + 1)
+                child_hash = push_hash(board, move, current_hash)
+                score = -self._quiescence(board, -beta, -alpha, ply + 1, child_hash, None, qply + 1)
                 board.pop()
                 if score > best_score:
                     best_score = score
+                    best_move = move
                 if score > alpha:
                     alpha = score
                 if alpha >= beta:
                     break
+            bound = (
+                Bound.UPPER
+                if best_score <= alpha_orig
+                else (Bound.LOWER if best_score >= beta else Bound.EXACT)
+            )
+            self.tt.store(
+                current_hash,
+                best_move,
+                score_to_tt(best_score, ply),
+                required_depth,
+                bound,
+            )
             return best_score
 
-        stand_pat = evaluate(board)
+        stand_pat = tt_static_eval if tt_static_eval is not None else evaluate(board)
         if stand_pat >= beta:
+            self.tt.store(
+                current_hash,
+                tt_move,
+                score_to_tt(stand_pat, ply),
+                required_depth,
+                Bound.LOWER,
+                stand_pat,
+            )
             return stand_pat
         best_score = stand_pat
         if stand_pat > alpha:
@@ -638,7 +685,7 @@ class Bot:
             if not move.promotion and (stand_pat + PIECE_VALUES[victim] + DELTA_PRUNING < alpha):
                 continue
             attacker = board.piece_type_at(move.from_square) or chess.PAWN
-            score = MVV_LVA[victim][attacker]
+            score = TT_MOVE_SCORE if move == tt_move else MVV_LVA[victim][attacker]
             if move.promotion == chess.QUEEN:
                 score += 10_000
             candidates.append((score, move))
@@ -658,21 +705,47 @@ class Bot:
                 pawn_promos &= pawn_promos - 1
 
         if not candidates:
-            return 0 if next(board.generate_legal_moves(), None) is None else best_score
+            if next(board.generate_legal_moves(), None) is None:
+                best_score = 0
+            bound = Bound.EXACT if best_score > alpha_orig else Bound.UPPER
+            self.tt.store(
+                current_hash,
+                None,
+                score_to_tt(best_score, ply),
+                required_depth,
+                bound,
+                stand_pat,
+            )
+            return best_score
 
         candidates.sort(key=lambda item: item[0], reverse=True)
+        best_move = None
         for _, move in candidates:
-            board.push(move)
-            score = -self._quiescence(board, -beta, -alpha, ply + 1, None, qply + 1)
+            child_hash = push_hash(board, move, current_hash)
+            score = -self._quiescence(board, -beta, -alpha, ply + 1, child_hash, None, qply + 1)
             board.pop()
 
             if score > best_score:
                 best_score = score
+                best_move = move
             if score > alpha:
                 alpha = score
             if alpha >= beta:
                 break
 
+        bound = (
+            Bound.UPPER
+            if best_score <= alpha_orig
+            else (Bound.LOWER if best_score >= beta else Bound.EXACT)
+        )
+        self.tt.store(
+            current_hash,
+            best_move,
+            score_to_tt(best_score, ply),
+            required_depth,
+            bound,
+            stand_pat,
+        )
         return best_score
 
     @staticmethod

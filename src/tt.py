@@ -120,8 +120,8 @@ class TT:
                 entry.static_eval = static_eval
             return
 
-        # Same hash — always update if new depth >= old depth, stale, or EXACT.
-        if depth >= entry.depth or (self.current_age - entry.age) > 2 or bound == Bound.EXACT:
+        # Same hash, keep the result with the deeper search horizon.
+        if depth >= entry.depth or (self.current_age - entry.age) > 2:
             # Preserve the best move if the new search didn't find one.
             if best_move is None:
                 best_move = entry.best_move
