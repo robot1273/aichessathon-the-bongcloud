@@ -66,6 +66,7 @@ def run_benchmark(
         start = time.perf_counter()
         move = bot.get_best_move(
             board,
+            time_left_ms=100_000,
             depth=depth,
             movetime_ms=movetime_ms,
             verbose=False,

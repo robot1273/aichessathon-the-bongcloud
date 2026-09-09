@@ -27,7 +27,7 @@ class SearchTests(unittest.TestCase):
             patch("src.search.NODE_CHECK_INTERVAL", 1),
             patch.object(bot.time_mgr, "is_time_up", return_value=True),
         ):
-            bot.get_best_move(board, movetime_ms=100)
+            bot.get_best_move(board, time_left_ms=100_000, movetime_ms=100)
 
         self.assertEqual(board.fen(), original_fen)
         self.assertFalse(board.move_stack)
@@ -38,7 +38,7 @@ class SearchTests(unittest.TestCase):
         bot.best_score = 456
         board = chess.Board("7k/8/8/8/8/8/8/K5Q1 b - - 0 1")
 
-        move = bot.get_best_move(board, depth=2)
+        move = bot.get_best_move(board, time_left_ms=100_000, depth=2)
 
         self.assertEqual(move, chess.Move.from_uci("h8h7"))
         self.assertEqual(bot.nodes, 0)

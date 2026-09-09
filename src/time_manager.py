@@ -9,16 +9,15 @@ from .evaluation import evaluate_with_phase
 
 class TimeManager:
     """Decide how long to think on a single move."""
-
-    INCREMENT_S: float = 0.5
     SAFETY_S: float = 1.0
 
-    def __init__(self) -> None:
+    def __init__(self, increment_s: float) -> None:
         self._start: float = 0.0
         self._soft_limit: float = 0.0
         self._hard_limit: float = 0.0
         self._is_fixed_time: bool = False
         self._usable: float = 0.0
+        self._increment_s: float = increment_s
 
     def start(
         self,
@@ -44,7 +43,7 @@ class TimeManager:
         base = self._base_time(usable, board.fullmove_number, phase)
 
         self._soft_limit = min(base, usable * 0.20)
-        self._hard_limit = min(base * 3.0, usable * 0.30)
+        self._hard_limit = min(base * 3.0, usable * 0.40)
 
     def extend_if_unstable(self, prev_score: int | None, curr_score: int | None) -> None:
         """Widen limits when the score swings between iterations."""
@@ -55,8 +54,8 @@ class TimeManager:
         swing = abs(curr_score - prev_score)
         if swing >= 50:
             factor = min(1.0 + swing / 200.0, 1.8)
-            self._soft_limit = min(self._soft_limit * factor, self._usable * 0.20)
-            self._hard_limit = min(self._hard_limit * factor, self._usable * 0.30)
+            self._soft_limit = min(self._soft_limit * factor, self._usable * 0.50)
+            self._hard_limit = min(self._hard_limit * factor, self._usable * 0.70)
 
     @property
     def soft_limit(self) -> float:
@@ -75,13 +74,9 @@ class TimeManager:
     def should_stop_iterating(self) -> bool:
         return self.elapsed() >= self._soft_limit
 
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _base_time(usable: float, move_number: int, phase: float) -> float:
-        """Compute the raw time budget for this move."""
+    def _base_time(self, usable: float, move_number: int, phase: float) -> float:
         expected_remaining = 20.0 + 25.0 * phase
-        base = usable / expected_remaining + TimeManager.INCREMENT_S * 0.8
+        base = (usable / expected_remaining) + (self._increment_s * 0.8)
         if 5 <= move_number <= 25:
             base *= 1.25
         return base

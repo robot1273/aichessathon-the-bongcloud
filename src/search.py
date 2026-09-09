@@ -40,6 +40,9 @@ RFP_MAX_DEPTH: Final[int] = 6
 RFP_MARGIN_PER_DEPTH: Final[int] = 80
 NODE_CHECK_INTERVAL: Final[int] = 512
 
+#2m+0.5s inc
+INCREMENT_S: Final[float] = 0.5
+
 _LMR_TABLE: Final[list[list[int]]] = [
     [
         max(0, int(1.0 + math.log(d) * math.log(m) / 2.0)) if d > 0 and m > 0 else 0
@@ -69,9 +72,13 @@ class SearchStats:
 
 
 class Bot:
-    def __init__(self, tt_exp_size: int = 22, collect_stats: bool = False) -> None:
+    def __init__(self,
+        tt_exp_size: int = 22,
+        collect_stats: bool = False,
+        increment_s: float = INCREMENT_S,  # if none, used default increment (0.5s)
+    ) -> None:
         self.tt = TT(exp_size=tt_exp_size)
-        self.time_mgr = TimeManager()
+        self.time_mgr = TimeManager(increment_s=increment_s)
         self.killers = KillerTable()
         self.history = HistoryTable()
         self.game_positions: dict[int, int] = {}
@@ -113,11 +120,11 @@ class Bot:
     def get_best_move(
         self,
         board: chess.Board,
-        time_left_ms: int = 100_000,
+        time_left_ms: int,
         depth: int | None = None,
         movetime_ms: int | None = None,
         verbose: bool = False,
-        callback: Callable[[dict[str, Any]], None] | None = None,
+        callback: Callable[[dict[str, Any]], None] | None = None
     ) -> chess.Move:
         self.time_mgr.start(time_left_ms, board, movetime_ms=movetime_ms)
         self.tt.new_search()
@@ -206,8 +213,11 @@ class Bot:
 
             if abs(best_score) > MATE_THRESHOLD:
                 break
-            if (depth is None or movetime_ms is not None) and self.time_mgr.should_stop_iterating():
+            if depth is not None and current_depth >= depth:
                 break
+            if self.time_mgr.should_stop_iterating():
+                break
+
 
         self.best_move = best_move
         self.best_score = best_score
@@ -232,12 +242,10 @@ class Bot:
             score, move = self._pvs_root(board, root_moves, depth, alpha, beta, root_hash)
             if score <= alpha:
                 delta *= 2
-                alpha = -INF if delta >= ASP_MAX_DELTA else prev_score - delta
-                beta = (alpha + beta) // 2 + delta
+                alpha = -INF if delta >= ASP_MAX_DELTA else max(-INF, prev_score - delta)
             elif score >= beta:
                 delta *= 2
-                beta = INF if delta >= ASP_MAX_DELTA else prev_score + delta
-                alpha = (alpha + beta) // 2 - delta
+                beta = INF if delta >= ASP_MAX_DELTA else min(INF, prev_score + delta)
             else:
                 return score, move
 
@@ -279,6 +287,7 @@ class Bot:
             )
             new_hash = push_hash(board, move, root_hash)
             child_in_check = bool(board.checkers_mask())
+
 
             if i == 0:
                 score = -self._pvs(
