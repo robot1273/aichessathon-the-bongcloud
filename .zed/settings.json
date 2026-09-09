@@ -1,16 +1,14 @@
 {
+  "languages": {
+    "Python": {
+      "language_servers": ["ruff"]
+    }
+  },
   "lsp": {
-    "basedpyright": {
-      "settings": {
-        "python": {
-          "pythonPath": ".venv/bin/python"
-        }
-      }
-    },
-    "pyright": {
-      "settings": {
-        "python": {
-          "pythonPath": ".venv/bin/python"
+    "ruff": {
+      "initialization_options": {
+        "settings": {
+          "lineLength": 120
         }
       }
     }

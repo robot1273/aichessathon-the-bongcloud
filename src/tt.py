@@ -1,134 +1,108 @@
-from enum import IntEnum
+from __future__ import annotations
 
-import chess
+# ruff: noqa
+import numpy as np
+from numba import njit
+
+BOUND_NONE = 0
+BOUND_EXACT = 1
+BOUND_LOWER = 2
+BOUND_UPPER = 3
+
+MATE_SCORE = 1_000_000
+MATE_THRESHOLD = 900_000
+NO_MOVE = 0
 
 
-class Bound(IntEnum):
-    NONE = 0  # entry is empty/invalid
-    EXACT = 1  # PV-node (exact score)
-    LOWER = 2  # all-node (failed high, beta cutoff)
-    UPPER = 3  # cut-node (failed low, no move improved alpha)
-
-
-MATE_SCORE: int = 1_000_000
-MATE_THRESHOLD: int = 900_000
-
-
+@njit(cache=False)
 def score_to_tt(score: int, ply: int) -> int:
-    """Adjust mate score for transposition table storage (relative to position, not root)."""
-    if abs(score) > MATE_THRESHOLD:
-        return score + ply if score > 0 else score - ply
+    if score > MATE_THRESHOLD:
+        return score + ply
+    if score < -MATE_THRESHOLD:
+        return score - ply
     return score
 
 
+@njit(cache=False)
 def score_from_tt(score: int, ply: int) -> int:
-    """Adjust mate score from transposition table retrieval (relative to root)."""
-    if abs(score) > MATE_THRESHOLD:
-        return score - ply if score > 0 else score + ply
+    if score > MATE_THRESHOLD:
+        return score - ply
+    if score < -MATE_THRESHOLD:
+        return score + ply
     return score
 
 
-class TTEntry:
-    __slots__ = ("age", "best_move", "bound", "depth", "hash", "score", "static_eval")
+def create_tt_arrays(
+    exp_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if exp_size < 1:
+        raise ValueError("Transposition table exponent must be positive")
 
-    def __init__(
-        self,
-        hash: int = 0,
-        score: int = 0,
-        best_move: chess.Move | None = None,
-        depth: int = 0,
-        bound: Bound = Bound.NONE,
-        age: int = 0,
-        static_eval: int = 0,
-    ) -> None:
-        self.hash = hash
-        self.score = score
-        self.best_move = best_move
-        self.depth = depth
-        self.bound = bound
-        self.age = age
-        self.static_eval = static_eval
+    table_size = 1 << exp_size
+    return (
+        np.zeros(table_size, dtype=np.uint64),
+        np.zeros(table_size, dtype=np.int32),
+        np.zeros(table_size, dtype=np.uint16),
+        np.zeros(table_size, dtype=np.int16),
+        np.zeros(table_size, dtype=np.uint8),
+        np.zeros(table_size, dtype=np.uint8),
+        np.zeros(table_size, dtype=np.int32),
+    )
 
 
-class TT:
-    """Transposition table with depth-preferred replacement and age-based eviction."""
+@njit(cache=False)
+def probe_tt(
+    hash_val: int,
+    tt_hash: np.ndarray,
+    tt_score: np.ndarray,
+    tt_move: np.ndarray,
+    tt_depth: np.ndarray,
+    tt_bound: np.ndarray,
+    tt_age: np.ndarray,
+    tt_static_eval: np.ndarray,
+) -> tuple[bool, int, int, int, int, int]:
+    """Returns (found, move, score, depth, bound, static_eval)"""
+    idx = hash_val & (tt_hash.size - 1)
+    if tt_bound[idx] != BOUND_NONE and tt_hash[idx] == hash_val:
+        return True, tt_move[idx], tt_score[idx], tt_depth[idx], tt_bound[idx], tt_static_eval[idx]
+    return False, NO_MOVE, 0, 0, BOUND_NONE, 0
 
-    def __init__(self, exp_size: int = 20) -> None:
-        self.exp_size = exp_size
-        self.table_size = 1 << exp_size
-        self.mask = self.table_size - 1
-        self.table: list[TTEntry | None] = [None] * self.table_size
-        self.current_age: int = 0
 
-    def clear(self) -> None:
-        """Reset transposition table entries and search age."""
-        self.table = [None] * self.table_size
-        self.current_age = 0
+@njit(cache=False)
+def store_tt(
+    hash_val: int,
+    best_move: int,
+    score: int,
+    depth: int,
+    bound: int,
+    static_eval: int,
+    current_age: int,
+    tt_hash: np.ndarray,
+    tt_score: np.ndarray,
+    tt_move: np.ndarray,
+    tt_depth: np.ndarray,
+    tt_bound: np.ndarray,
+    tt_age: np.ndarray,
+    tt_static_eval: np.ndarray,
+) -> None:
+    idx = hash_val & (tt_hash.size - 1)
+    old_hash = tt_hash[idx]
 
-    def new_search(self) -> None:
-        """Advance age counter at the start of a new root search."""
-        self.current_age += 1
+    replace = False
+    if tt_bound[idx] == BOUND_NONE or old_hash != hash_val:
+        replace = True
+    else:
+        old_depth = tt_depth[idx]
+        old_age = tt_age[idx]
+        age_diff = current_age - old_age
+        if depth >= old_depth or age_diff > 2 or bound == BOUND_EXACT:
+            replace = True
 
-    def probe(self, hash_val: int) -> TTEntry | None:
-        """Look up an entry by 64-bit Zobrist hash."""
-        entry = self.table[hash_val & self.mask]
-        if entry is not None and entry.bound != Bound.NONE and entry.hash == hash_val:
-            return entry
-        return None
-
-    def store(
-        self,
-        hash_val: int,
-        best_move: chess.Move | None,
-        score: int,
-        depth: int,
-        bound: Bound,
-        static_eval: int = 0,
-    ) -> None:
-        """Store an entry into the transposition table with replacement logic.
-
-        Replacement policy:
-        - Always replace if the slot is empty or has a different hash.
-        - For same-hash entries: replace if new depth >= old depth, or
-          the old entry is from a stale search (age difference > 2),
-          or the new entry is EXACT bound.
-        """
-        index = hash_val & self.mask
-        entry = self.table[index]
-
-        if entry is None:
-            self.table[index] = TTEntry(
-                hash=hash_val,
-                score=score,
-                best_move=best_move,
-                depth=depth,
-                bound=bound,
-                age=self.current_age,
-                static_eval=static_eval,
-            )
-            return
-
-        # Different hash — replace if new entry is deeper or old entry is stale.
-        if entry.hash != hash_val:
-            if depth >= entry.depth or (self.current_age - entry.age) > 2:
-                entry.hash = hash_val
-                entry.best_move = best_move
-                entry.score = score
-                entry.depth = depth
-                entry.bound = bound
-                entry.age = self.current_age
-                entry.static_eval = static_eval
-            return
-
-        # Same hash, keep the result with the deeper search horizon.
-        if depth >= entry.depth or (self.current_age - entry.age) > 2:
-            # Preserve the best move if the new search didn't find one.
-            if best_move is None:
-                best_move = entry.best_move
-            entry.hash = hash_val
-            entry.best_move = best_move
-            entry.score = score
-            entry.depth = depth
-            entry.bound = bound
-            entry.age = self.current_age
-            entry.static_eval = static_eval
+    if replace:
+        tt_hash[idx] = hash_val
+        tt_score[idx] = score
+        tt_move[idx] = best_move
+        tt_depth[idx] = depth
+        tt_bound[idx] = bound
+        tt_age[idx] = current_age
+        tt_static_eval[idx] = static_eval

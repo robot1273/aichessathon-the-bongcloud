@@ -4,9 +4,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import chess
-
-from src.search import MATE_SCORE, MATE_THRESHOLD, Bot, SearchStats
+from src.board import Board, move_to_uci
+from src.constants import MATE_SCORE, MATE_THRESHOLD
+from src.search import Bot, SearchStats
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +16,7 @@ class BenchmarkResult:
     depth: int
     sel_depth: int
     score: int
-    move: chess.Move
+    move: int
     nodes: int
     elapsed: float
     stats: SearchStats | None
@@ -44,7 +44,7 @@ def run_benchmark(
     results: list[BenchmarkResult] = []
 
     for index, (name, fen) in enumerate(positions, 1):
-        board = chess.Board(fen)
+        board = Board.from_fen(fen)
         print(f"\n[{index}/{len(positions)}] {name}")
         print(f"FEN: {fen}")
         print("-" * 86)
@@ -53,14 +53,14 @@ def run_benchmark(
             if quiet:
                 return
             move = info["pv"]
-            assert isinstance(move, chess.Move)
+            assert isinstance(move, int)
             print(
                 f"  depth {info['depth']:>2}/{info['sel_depth']:<2} "
                 f"| score {info['score_str']:>9} "
                 f"| nodes {info['nodes']:>10,} "
                 f"| nps {info['nps']:>10,} "
                 f"| time {info['time_ms']:>6}ms "
-                f"| pv {move.uci()}"
+                f"| pv {move_to_uci(move)}"
             )
 
         start = time.perf_counter()
@@ -88,7 +88,7 @@ def run_benchmark(
         print(
             f"=> Result: Depth {result.depth}/{result.sel_depth} "
             f"| Score: {format_score(result.score)} "
-            f"| Move: {result.move.uci()} "
+            f"| Move: {move_to_uci(result.move)} "
             f"| Nodes: {result.nodes:,} "
             f"| Time: {result.elapsed:.3f}s "
             f"| NPS: {result.nps:,}"
@@ -118,23 +118,51 @@ def print_summary(results: list[BenchmarkResult]) -> None:
     overall_nps = int(total_nodes / total_time) if total_time else 0
     average_depth = sum(result.depth for result in results) / len(results) if results else 0
 
-    print("\n" + "=" * 90)
-    print(f"{'BENCHMARK SUMMARY':^90}")
-    print("=" * 90)
+    print("\n" + "=" * 86)
+    print(f"{'BENCHMARK SUMMARY':^86}")
+    print("=" * 86)
     print(
-        f" {'Pos':<3} | {'Position Name':<20} | {'Depth':<8} | {'Score':<10} | {'Move':<6} "
-        f"| {'Nodes':<12} | {'Time (s)':<9} | {'NPS':<11}"
+        f"Positions: {len(results)} | "
+        f"Total Nodes: {total_nodes:,} | "
+        f"Total Time: {total_time:.3f}s | "
+        f"Average Depth: {average_depth:.1f}"
     )
-    print("-" * 90)
-    for result in results:
-        print(
-            f" {result.index:<3} | {result.name:<20} | {f'{result.depth}/{result.sel_depth}':<8} "
-            f"| {format_score(result.score):<10} | {result.move.uci():<6} "
-            f"| {result.nodes:>12,} | {result.elapsed:>9.3f} | {result.nps:>11,}"
-        )
-    print("-" * 90)
-    print(
-        f" {'TOTAL / OVERALL':<26} | {average_depth:>4.1f} avg | {'':<10} | {'':<6} "
-        f"| {total_nodes:>12,} | {total_time:>9.3f} | {overall_nps:>11,}"
+    print(f"Overall NPS: {overall_nps:,}")
+    print("=" * 86)
+
+
+BENCHMARK_POSITIONS = [
+    ("Starting Position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+    ("Kiwipete", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"),
+    ("Silver Suite Pos 2", "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1"),
+    ("Middlegame Pos 3", "r1bqk2r/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP1N1PPP/R1BQK2R w KQkq - 2 7"),
+    ("Endgame Pos 4", "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1"),
+]
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run engine benchmark suite.")
+    parser.add_argument("--depth", type=int, default=6, help="Search depth per position.")
+    parser.add_argument("--movetime", type=int, default=None, help="Move time in ms per position.")
+    parser.add_argument(
+        "--position",
+        type=str,
+        default="all",
+        choices=["all", "startpos", "kiwipete"],
+        help="Position to benchmark.",
     )
-    print("=" * 90 + "\n")
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-iteration logging.")
+    args = parser.parse_args()
+
+    positions = BENCHMARK_POSITIONS
+    if args.position == "startpos":
+        positions = [BENCHMARK_POSITIONS[0]]
+    elif args.position == "kiwipete":
+        positions = [BENCHMARK_POSITIONS[1]]
+
+    bot = Bot()
+    results = run_benchmark(
+        bot, positions, depth=args.depth, movetime_ms=args.movetime, quiet=args.quiet
+    )
+    print_summary(results)

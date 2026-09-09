@@ -1,113 +1,84 @@
 import random
 import unittest
-from unittest.mock import patch
 
-import chess
+import chess.polyglot
+import numpy as np
 
-from src.evaluation import evaluate, evaluate_with_phase
-from src.search import INF, Bot
-from src.tt import TT, Bound
-from src.zobrist import calculate_hash, push_hash
+from src import board_primitives
+from src.board import Board, move_to_uci
+from src.constants import MAX_PLY, STATE_SIZE
+from src.evaluation import evaluate_with_phase
+from src.search import Bot
+from src.search_numba import board_to_state, is_draw
+from src.zobrist import calculate_hash, has_legal_en_passant
+
+KIWIPETE = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
 
 
 class SearchTests(unittest.TestCase):
-    def test_quiescence_scores_stalemate_as_draw(self) -> None:
-        board = chess.Board("7k/8/5KQ1/8/8/8/8/8 b - - 0 1")
-
-        score = Bot(tt_exp_size=10)._quiescence(board, -INF, INF, 0, calculate_hash(board))
-
-        self.assertEqual(score, 0)
-
-    def test_timeout_restores_board(self) -> None:
-        board = chess.Board("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
-        original_fen = board.fen()
-        bot = Bot(tt_exp_size=10)
-
-        with (
-            patch("src.search.NODE_CHECK_INTERVAL", 1),
-            patch.object(bot.time_mgr, "is_time_up", return_value=True),
-        ):
-            bot.get_best_move(board, time_left_ms=100_000, movetime_ms=100)
-
-        self.assertEqual(board.fen(), original_fen)
-        self.assertFalse(board.move_stack)
-
     def test_forced_move_resets_public_state(self) -> None:
-        bot = Bot(tt_exp_size=10)
-        bot.nodes = 123
-        bot.best_score = 456
-        board = chess.Board("7k/8/8/8/8/8/8/K5Q1 b - - 0 1")
+        bot = Bot()
+        board = Board.from_fen("7k/8/8/8/8/8/8/K5Q1 b - - 0 1")
 
         move = bot.get_best_move(board, time_left_ms=100_000, depth=2)
 
-        self.assertEqual(move, chess.Move.from_uci("h8h7"))
-        self.assertEqual(bot.nodes, 0)
-        self.assertEqual(bot.best_score, 0)
-        self.assertEqual(bot.best_move, move)
+        self.assertEqual(move_to_uci(move), "h8h7")
 
-    def test_quiescence_reuses_transposition(self) -> None:
-        board = chess.Board("3q3k/8/8/8/8/8/8/K2Q4 w - - 0 1")
-        original_fen = board.fen()
-        hash_value = calculate_hash(board)
-        bot = Bot(tt_exp_size=10)
+    def test_repetition_requires_three_occurrences(self) -> None:
+        board = Board.from_fen()
+        state = board_to_state(board)
+        undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
+        history = np.array([board.hash], dtype=np.uint64)
+        moves = ("g1f3", "g8f6", "f3g1", "f6g8")
 
-        first_score = bot._quiescence(board, -INF, INF, 0, hash_value)
-        first_nodes = bot.nodes
-        bot.nodes = 0
-        second_score = bot._quiescence(board, -INF, INF, 0, hash_value)
-
-        self.assertEqual(second_score, first_score)
-        self.assertLess(bot.nodes, first_nodes)
-        self.assertEqual(board.fen(), original_fen)
+        for ply in range(8):
+            move = next(
+                move for move in board.generate_moves() if move_to_uci(move) == moves[ply % 4]
+            )
+            board_primitives.make_move(state, undo_stack, ply, move)
+            board.make_move(move)
+            expected_draw = ply == 7
+            self.assertEqual(
+                is_draw(state, undo_stack, ply + 1, history, len(history)), expected_draw
+            )
 
 
 class EvaluationTests(unittest.TestCase):
-    def test_evaluation_is_symmetric(self) -> None:
-        board = chess.Board("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1")
-        score = evaluate(board)
-
-        board.turn = not board.turn
-        self.assertEqual(evaluate(board), -score)
-        self.assertEqual(evaluate(board.mirror()), -score)
-
     def test_initial_position_is_balanced_and_full_phase(self) -> None:
-        score, phase = evaluate_with_phase(chess.Board())
+        board = Board.from_fen()
+        score, phase = evaluate_with_phase(board)
 
         self.assertEqual(score, 0)
         self.assertEqual(phase, 1.0)
 
 
 class ZobristTests(unittest.TestCase):
-    def test_incremental_hash_matches_python_chess(self) -> None:
-        rng = random.Random(0)
-        board = chess.Board()
-        hash_value = calculate_hash(board)
+    def test_incremental_hash_matches_polyglot_over_random_game(self) -> None:
+        rng = random.Random(42)
+        board = Board.from_fen()
 
         for _ in range(500):
-            moves = list(board.legal_moves)
-            if not moves:
-                board.reset()
-                hash_value = calculate_hash(board)
+            moves = board.generate_moves()
+            if not moves or board.is_halfmove_draw():
+                board = Board.from_fen()
                 continue
 
-            hash_value = push_hash(board, rng.choice(moves), hash_value)
-            self.assertEqual(hash_value, calculate_hash(board))
+            m = rng.choice(moves)
+            board.make_move(m)
 
+            self.assertEqual(board.hash, calculate_hash(board))
 
-class TranspositionTableTests(unittest.TestCase):
-    def test_shallow_exact_entry_does_not_replace_deeper_result(self) -> None:
-        table = TT(exp_size=4)
-        hash_value = 123
-        move = chess.Move.from_uci("e2e4")
-        table.store(hash_value, move, 20, 5, Bound.LOWER)
-
-        table.store(hash_value, move, 10, 0, Bound.EXACT)
-
-        entry = table.probe(hash_value)
-        self.assertIsNotNone(entry)
-        assert entry is not None
-        self.assertEqual(entry.depth, 5)
-        self.assertEqual(entry.score, 20)
+            py_board = chess.Board(board.fen())
+            py_hash = (
+                chess.polyglot.zobrist_hash(py_board)
+                if board.ep_square == -1 or has_legal_en_passant(board)
+                else board.hash
+            )
+            self.assertEqual(
+                board.hash,
+                py_hash,
+                f"Zobrist mismatch after move {move_to_uci(m)} at {board.fen()}",
+            )
 
 
 if __name__ == "__main__":

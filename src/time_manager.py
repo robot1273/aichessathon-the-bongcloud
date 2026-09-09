@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import time
-
-import chess
-
-from .evaluation import evaluate_with_phase
+from typing import Any
 
 
 class TimeManager:
     """Decide how long to think on a single move."""
+
     SAFETY_S: float = 1.0
 
     def __init__(self, increment_s: float) -> None:
@@ -22,7 +20,7 @@ class TimeManager:
     def start(
         self,
         time_left_ms: int,
-        board: chess.Board,
+        board: Any,
         movetime_ms: int | None = None,
     ) -> None:
         """Begin the clock for one move."""
@@ -39,8 +37,16 @@ class TimeManager:
         self._is_fixed_time = False
         usable = max(time_left_ms / 1000.0 - self.SAFETY_S, 0.01)
         self._usable = usable
-        _, phase = evaluate_with_phase(board)
-        base = self._base_time(usable, board.fullmove_number, phase)
+
+        if hasattr(board, "game_phase"):
+            phase = min(board.game_phase, 5560) / 5560.0
+        else:
+            from .evaluation import evaluate_with_phase
+
+            _, phase = evaluate_with_phase(board)
+
+        move_num = getattr(board, "fullmove", getattr(board, "fullmove_number", 1))
+        base = self._base_time(usable, move_num, phase)
 
         self._soft_limit = min(base, usable * 0.20)
         self._hard_limit = min(base * 3.0, usable * 0.40)

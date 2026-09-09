@@ -1,0 +1,10 @@
+[
+  {
+    "label": "mypy",
+    "command": "uv",
+    "args": ["run", "mypy"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "all",
+    "reveal": "always"
+  }
+]

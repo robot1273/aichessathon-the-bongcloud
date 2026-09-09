@@ -1,773 +1,322 @@
+"""Bot wrapper for Numba-jitted search."""
+
 from __future__ import annotations
 
-import math
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Final
+import ctypes
+import time
+from typing import Any
 
-import chess
+import numpy as np
 
-from .evaluation import evaluate
-from .move_ordering import (
-    MVV_LVA,
-    PIECE_VALUES,
-    TT_MOVE_SCORE,
-    HistoryTable,
-    KillerTable,
-    order_moves,
+from src.board import Board, move_to_uci
+from src.constants import INF, MATE_SCORE, MATE_THRESHOLD, MAX_PLY, NO_MOVE, STATE_SIZE
+from src.search_numba import (
+    board_to_state,
+    search_root,
 )
-from .time_manager import TimeManager
-from .tt import TT, Bound, score_from_tt, score_to_tt
-from .zobrist import calculate_hash, push_hash
+from src.time_manager import TimeManager
+from src.tt import create_tt_arrays
 
-MATE_SCORE: Final[int] = 1_000_000
-MATE_THRESHOLD: Final[int] = 900_000
-MAX_DEPTH: Final[int] = 100
-MAX_QUIESCENCE_DEPTH: Final[int] = 16
-DELTA_PRUNING: Final[int] = 200
-INF: Final[int] = MATE_SCORE + 1
-
-ASP_INITIAL_DELTA: Final[int] = 25
-ASP_MAX_DELTA: Final[int] = 500
-ASP_MIN_DEPTH: Final[int] = 5
-
-NMP_MIN_DEPTH: Final[int] = 3
-LMR_MIN_DEPTH: Final[int] = 3
-LMR_MIN_MOVE_INDEX: Final[int] = 3
-FUTILITY_MAX_DEPTH: Final[int] = 3
-FUTILITY_MARGIN_PER_DEPTH: Final[int] = 120
-RFP_MAX_DEPTH: Final[int] = 6
-RFP_MARGIN_PER_DEPTH: Final[int] = 80
-NODE_CHECK_INTERVAL: Final[int] = 512
-
-#2m+0.5s inc
-INCREMENT_S: Final[float] = 0.5
-
-_LMR_TABLE: Final[list[list[int]]] = [
-    [
-        max(0, int(1.0 + math.log(d) * math.log(m) / 2.0)) if d > 0 and m > 0 else 0
-        for m in range(64)
-    ]
-    for d in range(64)
-]
+# Libc clock for microsecond time tracking
+libc = ctypes.CDLL(None)
+clock = libc.clock
+clock.restype = ctypes.c_long
+clock.argtypes = []
 
 
-class SearchAborted(Exception):
-    pass
-
-
-@dataclass(frozen=True, slots=True)
 class SearchStats:
-    nodes: int
-    qnodes: int
-    move_generations: int
-    tt_probes: int
-    tt_hits: int
-    tt_cutoffs: int
-    beta_cutoffs: int
-    rfp_prunes: int
-    futility_prunes: int
-    null_prunes: int
-    lmr_reductions: int
+    nodes: int = 0
+    qnodes: int = 0
+    move_generations: int = 0
+    tt_probes: int = 0
+    tt_hits: int = 0
+    tt_cutoffs: int = 0
+    beta_cutoffs: int = 0
+    rfp_prunes: int = 0
+    futility_prunes: int = 0
+    null_prunes: int = 0
+    lmr_reductions: int = 0
+
+
+INCREMENT_S = 0.5
 
 
 class Bot:
-    def __init__(self,
+    def __init__(
+        self,
         tt_exp_size: int = 22,
         collect_stats: bool = False,
-        increment_s: float = INCREMENT_S,  # if none, used default increment (0.5s)
+        increment_s: float = INCREMENT_S,
     ) -> None:
-        self.tt = TT(exp_size=tt_exp_size)
-        self.time_mgr = TimeManager(increment_s=increment_s)
-        self.killers = KillerTable()
-        self.history = HistoryTable()
-        self.game_positions: dict[int, int] = {}
+        self.tt_exp_size = tt_exp_size
         self.collect_stats = collect_stats
-        self.nodes: int = 0
-        self.sel_depth: int = 0
-        self.completed_depth: int = 0
-        self.best_move: chess.Move | None = None
-        self.best_score: int = 0
-        self.qnodes: int = 0
-        self.move_generations: int = 0
-        self.tt_probes: int = 0
-        self.tt_hits: int = 0
-        self.tt_cutoffs: int = 0
-        self.beta_cutoffs: int = 0
-        self.rfp_prunes: int = 0
-        self.futility_prunes: int = 0
-        self.null_prunes: int = 0
-        self.lmr_reductions: int = 0
+        self.increment_s = increment_s
+        self.current_age = 0
+        self.tt_arrays = create_tt_arrays(tt_exp_size)
+        self.time_mgr = TimeManager(increment_s=increment_s)
 
-    @property
-    def search_stats(self) -> SearchStats | None:
-        if not self.collect_stats:
-            return None
-        return SearchStats(
-            nodes=self.nodes,
-            qnodes=self.qnodes,
-            move_generations=self.move_generations,
-            tt_probes=self.tt_probes,
-            tt_hits=self.tt_hits,
-            tt_cutoffs=self.tt_cutoffs,
-            beta_cutoffs=self.beta_cutoffs,
-            rfp_prunes=self.rfp_prunes,
-            futility_prunes=self.futility_prunes,
-            null_prunes=self.null_prunes,
-            lmr_reductions=self.lmr_reductions,
+        # Pre-allocate reusable search arrays across moves
+        self.undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
+        self.moves_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
+        self.scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
+        self.killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
+        self.history = np.zeros((2, 64, 64), dtype=np.int32)
+        self.stats = np.zeros(4, dtype=np.int64)
+
+        self.completed_depth = 0
+        self.sel_depth = 0
+        self.best_score = 0
+        self.nodes = 0
+        self.best_move = NO_MOVE
+        self.search_stats: SearchStats | None = None
+        self._game_hashes: list[int] = []
+        self._pending_position: Board | None = None
+
+        self._warmup_jit()
+
+    def _warmup_jit(self) -> None:
+        """Warm up the JIT compiler with a dummy search."""
+        board = Board.from_fen()
+        state = board_to_state(board)
+        hash_history = np.zeros(MAX_PLY, dtype=np.uint64)
+        search_root(
+            state,
+            self.undo_stack,
+            self.moves_stack,
+            self.scores_stack,
+            -100,
+            100,
+            3,
+            self.killers,
+            self.history,
+            self.stats,
+            hash_history,
+            0,
+            0,
+            *self.tt_arrays,
         )
 
     def get_best_move(
         self,
-        board: chess.Board,
+        board: Board,
         time_left_ms: int,
         depth: int | None = None,
         movetime_ms: int | None = None,
         verbose: bool = False,
-        callback: Callable[[dict[str, Any]], None] | None = None
-    ) -> chess.Move:
-        self.time_mgr.start(time_left_ms, board, movetime_ms=movetime_ms)
-        self.tt.new_search()
-        self.killers.clear()
+        callback: Any | None = None,
+    ) -> int:
+        self.current_age += 1
+        self._record_position(board)
 
-        self.nodes = 0
-        self.sel_depth = 0
-        self.completed_depth = 0
-        self.best_move = None
-        self.best_score = 0
-        self.qnodes = 0
-        self.move_generations = 0
-        self.tt_probes = 0
-        self.tt_hits = 0
-        self.tt_cutoffs = 0
-        self.beta_cutoffs = 0
-        self.rfp_prunes = 0
-        self.futility_prunes = 0
-        self.null_prunes = 0
-        self.lmr_reductions = 0
-
-        root_hash = calculate_hash(board)
-        self.game_positions[root_hash] = self.game_positions.get(root_hash, 0) + 1
-        legal_moves = list(board.legal_moves)
+        # Check for immediate return on forced moves or no moves
+        legal_moves = board.generate_moves()
         if not legal_moves:
-            return chess.Move.null()
+            self.best_move = NO_MOVE
+            self.nodes = 0
+            self.completed_depth = 0
+            self.best_score = 0
+            return NO_MOVE
+
         if len(legal_moves) == 1:
             self.best_move = legal_moves[0]
+            self.nodes = 1
+            self.completed_depth = 1
+            self.best_score = 0
+            self._record_selected_move(board, legal_moves[0])
             return legal_moves[0]
 
+        # Configure time management
+        self.time_mgr.start(time_left_ms, board, movetime_ms)
+        hard_limit_s = self.time_mgr._hard_limit
+
+        state = board_to_state(board)
+        start_t = time.perf_counter()
+
+        # Build game history for repetition checking. The current root is last.
+        hash_history = np.zeros(MAX_PLY, dtype=np.uint64)
+        hist_len = min(len(self._game_hashes), MAX_PLY)
+        for i in range(hist_len):
+            hash_history[i] = np.uint64(self._game_hashes[-hist_len + i])
+
+        # Setup deadline in clock ticks
+        start_ticks = clock()
+        if depth is not None:
+            # Fixed depth: no deadline unless movetime_ms specified
+            deadline_ticks = (
+                0 if movetime_ms is None else start_ticks + int(hard_limit_s * 1_000_000)
+            )
+        else:
+            deadline_ticks = start_ticks + int(hard_limit_s * 1_000_000)
+
+        self.stats[0] = 0  # nodes
+        self.stats[1] = 0  # aborted flag
+        self.stats[2] = start_ticks
+        self.stats[3] = deadline_ticks
+
+        # Clear killer heuristics per search; age history
+        self.killers.fill(0)
+        self.history //= 2
+
         best_move = legal_moves[0]
-        best_score = -INF
+        best_score = 0
         prev_score = 0
-        prev_best: int | None = None
-        target_depth = depth if depth is not None else MAX_DEPTH
-        root_ply = len(board.move_stack)
+        completed_depth = 0
+        max_d = depth if depth is not None else 64
 
-        for current_depth in range(1, target_depth + 1):
-            self.sel_depth = 0
-
-            try:
-                score, move = self._search_root(
-                    board, legal_moves, current_depth, prev_score, root_hash
-                )
-            except SearchAborted:
-                while len(board.move_stack) > root_ply:
-                    board.pop()
+        for d in range(1, max_d + 1):
+            if d > 1 and depth is None and self.time_mgr.should_stop_iterating():
                 break
 
-            if move is not None:
+            # Aspiration window for depth >= 5
+            if d >= 5 and abs(best_score) < MATE_THRESHOLD:
+                delta = 30
+                alpha = max(-INF, best_score - delta)
+                beta = min(INF, best_score + delta)
+                score, move, aborted = search_root(
+                    state,
+                    self.undo_stack,
+                    self.moves_stack,
+                    self.scores_stack,
+                    alpha,
+                    beta,
+                    d,
+                    self.killers,
+                    self.history,
+                    self.stats,
+                    hash_history,
+                    hist_len,
+                    self.current_age,
+                    *self.tt_arrays,
+                )
+
+                if not aborted and score <= alpha:
+                    # Fail low: widen window to -INF
+                    score, move, aborted = search_root(
+                        state,
+                        self.undo_stack,
+                        self.moves_stack,
+                        self.scores_stack,
+                        -INF,
+                        beta,
+                        d,
+                        self.killers,
+                        self.history,
+                        self.stats,
+                        hash_history,
+                        hist_len,
+                        self.current_age,
+                        *self.tt_arrays,
+                    )
+                elif not aborted and score >= beta:
+                    # Fail high: widen window to INF
+                    score, move, aborted = search_root(
+                        state,
+                        self.undo_stack,
+                        self.moves_stack,
+                        self.scores_stack,
+                        alpha,
+                        INF,
+                        d,
+                        self.killers,
+                        self.history,
+                        self.stats,
+                        hash_history,
+                        hist_len,
+                        self.current_age,
+                        *self.tt_arrays,
+                    )
+            else:
+                score, move, aborted = search_root(
+                    state,
+                    self.undo_stack,
+                    self.moves_stack,
+                    self.scores_stack,
+                    -INF,
+                    INF,
+                    d,
+                    self.killers,
+                    self.history,
+                    self.stats,
+                    hash_history,
+                    hist_len,
+                    self.current_age,
+                    *self.tt_arrays,
+                )
+
+            if aborted:
+                break
+
+            if move != NO_MOVE:
                 best_move = move
                 best_score = score
-                self.completed_depth = current_depth
+            completed_depth = d
 
-            self.time_mgr.extend_if_unstable(prev_best, best_score)
-            prev_best = best_score
-            prev_score = best_score
+            self.time_mgr.extend_if_unstable(prev_score, score)
+            if depth is None:
+                self.stats[3] = start_ticks + int(self.time_mgr._hard_limit * 1_000_000)
+            prev_score = score
 
-            elapsed = max(self.time_mgr.elapsed(), 0.001)
-            nps = int(self.nodes / elapsed)
-            elapsed_ms = int(elapsed * 1000)
-            score_str = self._format_score(best_score)
+            nodes = int(self.stats[0])
+            elapsed = max(time.perf_counter() - start_t, 0.0001)
+            nps = int(nodes / elapsed)
 
-            iter_info: dict[str, Any] = {
-                "depth": current_depth,
-                "sel_depth": self.sel_depth,
-                "score": best_score,
-                "score_str": score_str,
-                "nodes": self.nodes,
-                "nps": nps,
-                "time": elapsed,
-                "time_ms": elapsed_ms,
-                "pv": best_move,
-            }
-            if callback is not None:
-                callback(iter_info)
-            elif verbose:
-                print(
-                    f"depth {current_depth:>2}/{self.sel_depth:<3} "
-                    f"score {score_str:>8} "
-                    f"nodes {self.nodes:>9,} "
-                    f"nps {nps:>9,} "
-                    f"time {elapsed_ms:>6}ms "
-                    f"pv {best_move.uci()}"
-                )
+            if verbose or callback:
+                if abs(best_score) > MATE_THRESHOLD:
+                    mate_dist = (MATE_SCORE - abs(best_score) + 1) // 2
+                    score_str = f"mate {mate_dist if best_score > 0 else -mate_dist}"
+                else:
+                    score_str = f"cp {best_score}"
+
+                info = {
+                    "depth": d,
+                    "sel_depth": d,
+                    "score": best_score,
+                    "score_str": score_str,
+                    "nodes": nodes,
+                    "nps": nps,
+                    "time": elapsed,
+                    "time_ms": int(elapsed * 1000),
+                    "pv": best_move,
+                }
+                if callback:
+                    callback(info)
+                if verbose:
+                    print(
+                        f"info depth {d} score {score_str} nodes {nodes} "
+                        f"nps {nps} time {int(elapsed * 1000)} pv {move_to_uci(best_move)}"
+                    )
 
             if abs(best_score) > MATE_THRESHOLD:
                 break
-            if self.time_mgr.should_stop_iterating():
-                break
-
 
         self.best_move = best_move
         self.best_score = best_score
+        self.completed_depth = completed_depth
+        self.sel_depth = completed_depth
+        self.nodes = int(self.stats[0])
+        self._record_selected_move(board, best_move)
+
         return best_move
 
-    def _search_root(
-        self,
-        board: chess.Board,
-        root_moves: list[chess.Move],
-        depth: int,
-        prev_score: int,
-        root_hash: int,
-    ) -> tuple[int, chess.Move | None]:
-        self.nodes += 1
-        if depth < ASP_MIN_DEPTH:
-            return self._pvs_root(board, root_moves, depth, -INF, INF, root_hash)
+    def _record_position(self, board: Board) -> None:
+        if self._pending_position is None:
+            self._game_hashes = [board.hash]
+            return
 
-        delta = ASP_INITIAL_DELTA
-        alpha = prev_score - delta
-        beta = prev_score + delta
+        candidate = self._pending_position.copy()
+        for move in candidate.generate_moves():
+            candidate.make_move(move)
+            if candidate.hash == board.hash:
+                self._game_hashes.append(board.hash)
+                return
+            candidate.unmake_move()
 
-        while True:
-            score, move = self._pvs_root(board, root_moves, depth, alpha, beta, root_hash)
-            if score <= alpha:
-                delta *= 2
-                alpha = -INF if delta >= ASP_MAX_DELTA else max(-INF, prev_score - delta)
-            elif score >= beta:
-                delta *= 2
-                beta = INF if delta >= ASP_MAX_DELTA else min(INF, prev_score + delta)
-            else:
-                return score, move
+        self._game_hashes = [board.hash]
+        self._pending_position = None
 
-    def _pvs_root(
-        self,
-        board: chess.Board,
-        root_moves: list[chess.Move],
-        depth: int,
-        alpha: int,
-        beta: int,
-        root_hash: int,
-    ) -> tuple[int, chess.Move | None]:
-        tt_entry = self.tt.probe(root_hash)
-        tt_move = tt_entry.best_move if tt_entry is not None else None
-
-        moves = order_moves(
-            board,
-            root_moves.copy(),
-            tt_move=tt_move,
-            ply=0,
-            killers=self.killers,
-            history=self.history,
-        )
-        if not moves:
-            return (-MATE_SCORE if board.is_check() else 0), None
-
-        best_move = moves[0]
-        best_score = -INF
-        alpha_orig = alpha
-        searched_quiets: list[chess.Move] = []
-
-        for i, move in enumerate(moves):
-            is_capture = bool(
-                board.occupied & chess.BB_SQUARES[move.to_square]
-                or (
-                    move.to_square == board.ep_square
-                    and board.pawns & chess.BB_SQUARES[move.from_square]
-                )
-            )
-            new_hash = push_hash(board, move, root_hash)
-            child_in_check = board.is_check()
-
-
-            if i == 0:
-                score = -self._pvs(
-                    board, depth - 1, -beta, -alpha, 1, new_hash, False, child_in_check
-                )
-            else:
-                score = -self._pvs(
-                    board, depth - 1, -alpha - 1, -alpha, 1, new_hash, False, child_in_check
-                )
-                if alpha < score < beta:
-                    score = -self._pvs(
-                        board, depth - 1, -beta, -alpha, 1, new_hash, False, child_in_check
-                    )
-
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-            if score > alpha:
-                alpha = score
-            if alpha >= beta:
-                if not is_capture and not move.promotion:
-                    self.killers.store(0, move)
-                    self.history.update(board.turn, move, depth)
-                    for prev in searched_quiets:
-                        self.history.penalise(board.turn, prev, depth)
-                break
-            if not is_capture and not move.promotion:
-                searched_quiets.append(move)
-
-        bound = (
-            Bound.UPPER
-            if best_score <= alpha_orig
-            else (Bound.LOWER if best_score >= beta else Bound.EXACT)
-        )
-        self.tt.store(
-            root_hash,
-            best_move,
-            score_to_tt(best_score, 0),
-            depth,
-            bound,
-            evaluate(board),
-        )
-        return best_score, best_move
-
-    def _pvs(
-        self,
-        board: chess.Board,
-        depth: int,
-        alpha: int,
-        beta: int,
-        ply: int,
-        current_hash: int,
-        null_move_made: bool,
-        in_check: bool | None = None,
-    ) -> int:
-        if self.game_positions.get(current_hash, 0) >= 2:
-            return 0
-        if depth <= 0:
-            return self._quiescence(board, alpha, beta, ply, current_hash, in_check, 0)
-
-        self.nodes += 1
-        if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
-            raise SearchAborted
-
-        if ply > self.sel_depth:
-            self.sel_depth = ply
-
-        if self._is_draw(board):
-            return 0
-
-        alpha = max(alpha, -(MATE_SCORE - ply))
-        beta = min(beta, MATE_SCORE - ply - 1)
-        if alpha >= beta:
-            return alpha
-
-        is_pv = beta - alpha > 1
-        tt_move: chess.Move | None = None
-        tt_static_eval: int | None = None
-
-        if self.collect_stats:
-            self.tt_probes += 1
-        tt_entry = self.tt.probe(current_hash)
-        if tt_entry is not None:
-            if self.collect_stats:
-                self.tt_hits += 1
-            tt_move = tt_entry.best_move
-            tt_static_eval = tt_entry.static_eval
-            if tt_entry.depth >= depth and not is_pv:
-                tt_score = score_from_tt(tt_entry.score, ply)
-                if (
-                    tt_entry.bound == Bound.EXACT
-                    or (tt_entry.bound == Bound.LOWER and tt_score >= beta)
-                    or (tt_entry.bound == Bound.UPPER and tt_score <= alpha)
-                ):
-                    if self.collect_stats:
-                        self.tt_cutoffs += 1
-                    return tt_score
-
-        if in_check is None:
-            in_check = bool(board.checkers_mask())
-        if in_check:
-            static_eval = -INF
-        elif tt_static_eval is not None:
-            static_eval = tt_static_eval
-        else:
-            static_eval = evaluate(board)
-
-        if (
-            not is_pv
-            and not in_check
-            and depth <= RFP_MAX_DEPTH
-            and static_eval - RFP_MARGIN_PER_DEPTH * depth >= beta
-            and abs(beta) < MATE_THRESHOLD
-            and next(board.generate_legal_moves(), None) is not None
-        ):
-            if self.collect_stats:
-                self.rfp_prunes += 1
-            return static_eval
-
-        if (
-            not is_pv
-            and not in_check
-            and not null_move_made
-            and depth >= NMP_MIN_DEPTH
-            and static_eval >= beta
-            and bool(
-                board.occupied_co[board.turn]
-                & (board.knights | board.bishops | board.rooks | board.queens)
-            )
-            and next(board.generate_legal_moves(), None) is not None
-        ):
-            r = min(3 + depth // 6, depth - 1)
-            null_hash = push_hash(board, chess.Move.null(), current_hash)
-            null_score = -self._pvs(
-                board, depth - 1 - r, -beta, -beta + 1, ply + 1, null_hash, True, False
-            )
-            board.pop()
-            if null_score >= beta:
-                if self.collect_stats:
-                    self.null_prunes += 1
-                return beta if null_score > MATE_THRESHOLD else null_score
-
-        can_futility = (
-            not is_pv
-            and not in_check
-            and depth <= FUTILITY_MAX_DEPTH
-            and static_eval + FUTILITY_MARGIN_PER_DEPTH * depth <= alpha
-            and abs(alpha) < MATE_THRESHOLD
-        )
-        alpha_orig = alpha
-        if self.collect_stats:
-            self.move_generations += 1
-        moves = order_moves(
-            board,
-            list(board.legal_moves),
-            tt_move=tt_move,
-            ply=ply,
-            killers=self.killers,
-            history=self.history,
-        )
-        if not moves:
-            return -(MATE_SCORE - ply) if in_check else 0
-
-        best_score = -INF
-        best_move: chess.Move | None = None
-        searched_quiets: list[chess.Move] = []
-        moves_tried = 0
-
-        for move in moves:
-            is_capture = bool(
-                board.occupied & chess.BB_SQUARES[move.to_square]
-                or (
-                    move.to_square == board.ep_square
-                    and board.pawns & chess.BB_SQUARES[move.from_square]
-                )
-            )
-            is_promotion = move.promotion is not None
-            is_tactical = is_capture or is_promotion
-
-            if can_futility and moves_tried > 0 and not is_tactical and not board.gives_check(move):
-                if self.collect_stats:
-                    self.futility_prunes += 1
-                continue
-
-            new_hash = push_hash(board, move, current_hash)
-            child_in_check = board.is_check()
-            new_depth = depth - 1
-
-            reduction = 0
-            if (
-                moves_tried >= LMR_MIN_MOVE_INDEX
-                and depth >= LMR_MIN_DEPTH
-                and not is_tactical
-                and not in_check
-                and not child_in_check
-            ):
-                reduction = _LMR_TABLE[min(depth, 63)][min(moves_tried, 63)]
-                if is_pv:
-                    reduction = max(0, reduction - 1)
-                if self.history.get(not board.turn, move) > 0:
-                    reduction = max(0, reduction - 1)
-                reduction = min(reduction, new_depth - 1)
-                if reduction and self.collect_stats:
-                    self.lmr_reductions += 1
-
-            if moves_tried == 0:
-                score = -self._pvs(
-                    board, new_depth, -beta, -alpha, ply + 1, new_hash, False, child_in_check
-                )
-            else:
-                score = -self._pvs(
-                    board,
-                    new_depth - reduction,
-                    -alpha - 1,
-                    -alpha,
-                    ply + 1,
-                    new_hash,
-                    False,
-                    child_in_check,
-                )
-                if reduction > 0 and score > alpha:
-                    score = -self._pvs(
-                        board,
-                        new_depth,
-                        -alpha - 1,
-                        -alpha,
-                        ply + 1,
-                        new_hash,
-                        False,
-                        child_in_check,
-                    )
-                if is_pv and alpha < score < beta:
-                    score = -self._pvs(
-                        board,
-                        new_depth,
-                        -beta,
-                        -alpha,
-                        ply + 1,
-                        new_hash,
-                        False,
-                        child_in_check,
-                    )
-
-            board.pop()
-            moves_tried += 1
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-            if score > alpha:
-                alpha = score
-            if alpha >= beta:
-                if self.collect_stats:
-                    self.beta_cutoffs += 1
-                if not is_tactical:
-                    self.killers.store(ply, move)
-                    self.history.update(board.turn, move, depth)
-                    for prev in searched_quiets:
-                        self.history.penalise(board.turn, prev, depth)
-                break
-            if not is_tactical:
-                searched_quiets.append(move)
-
-        bound = (
-            Bound.UPPER
-            if best_score <= alpha_orig
-            else (Bound.LOWER if best_score >= beta else Bound.EXACT)
-        )
-        self.tt.store(
-            current_hash,
-            best_move,
-            score_to_tt(best_score, ply),
-            depth,
-            bound,
-            static_eval if static_eval != -INF else 0,
-        )
-        return best_score
-
-    def _quiescence(
-        self,
-        board: chess.Board,
-        alpha: int,
-        beta: int,
-        ply: int,
-        current_hash: int,
-        in_check: bool | None = None,
-        qply: int = 0,
-    ) -> int:
-        self.nodes += 1
-        if self.collect_stats:
-            self.qnodes += 1
-        if self.nodes & (NODE_CHECK_INTERVAL - 1) == 0 and self.time_mgr.is_time_up():
-            raise SearchAborted
-
-        if ply > self.sel_depth:
-            self.sel_depth = ply
-        if in_check is None:
-            in_check = bool(board.checkers_mask())
-
-        if qply >= MAX_QUIESCENCE_DEPTH + 4:
-            return evaluate(board)
-        if qply >= MAX_QUIESCENCE_DEPTH and not in_check:
-            return evaluate(board)
-
-        alpha = max(alpha, -(MATE_SCORE - ply))
-        beta = min(beta, MATE_SCORE - ply - 1)
-        if alpha >= beta:
-            return alpha
-        alpha_orig = alpha
-
-        required_depth = -qply
-        tt_move: chess.Move | None = None
-        tt_static_eval: int | None = None
-        tt_entry = self.tt.probe(current_hash)
-        if tt_entry is not None:
-            tt_move = tt_entry.best_move
-            tt_static_eval = tt_entry.static_eval
-            if tt_entry.depth >= required_depth:
-                tt_score = score_from_tt(tt_entry.score, ply)
-                if (
-                    tt_entry.bound == Bound.EXACT
-                    or (tt_entry.bound == Bound.LOWER and tt_score >= beta)
-                    or (tt_entry.bound == Bound.UPPER and tt_score <= alpha)
-                ):
-                    return tt_score
-
-        if in_check:
-            if self.collect_stats:
-                self.move_generations += 1
-            moves = list(board.legal_moves)
-            if not moves:
-                return -(MATE_SCORE - ply)
-            occupied = board.occupied
-            ep_square = board.ep_square
-            pawns = board.pawns
-            moves.sort(
-                key=lambda move: (
-                    2
-                    if move == tt_move
-                    else bool(
-                        occupied & chess.BB_SQUARES[move.to_square]
-                        or (
-                            move.to_square == ep_square
-                            and pawns & chess.BB_SQUARES[move.from_square]
-                        )
-                    )
-                ),
-                reverse=True,
-            )
-            best_score = -INF
-            best_move: chess.Move | None = None
-            for move in moves:
-                child_hash = push_hash(board, move, current_hash)
-                score = -self._quiescence(board, -beta, -alpha, ply + 1, child_hash, None, qply + 1)
-                board.pop()
-                if score > best_score:
-                    best_score = score
-                    best_move = move
-                if score > alpha:
-                    alpha = score
-                if alpha >= beta:
-                    break
-            bound = (
-                Bound.UPPER
-                if best_score <= alpha_orig
-                else (Bound.LOWER if best_score >= beta else Bound.EXACT)
-            )
-            self.tt.store(
-                current_hash,
-                best_move,
-                score_to_tt(best_score, ply),
-                required_depth,
-                bound,
-            )
-            return best_score
-
-        stand_pat = tt_static_eval if tt_static_eval is not None else evaluate(board)
-        if stand_pat >= beta:
-            self.tt.store(
-                current_hash,
-                tt_move,
-                score_to_tt(stand_pat, ply),
-                required_depth,
-                Bound.LOWER,
-                stand_pat,
-            )
-            return stand_pat
-        best_score = stand_pat
-        if stand_pat > alpha:
-            alpha = stand_pat
-
-        candidates: list[tuple[int, chess.Move]] = []
-        if self.collect_stats:
-            self.move_generations += 1
-        for move in board.generate_legal_captures():
-            to_sq = move.to_square
-            victim = (
-                chess.PAWN
-                if to_sq == board.ep_square
-                else (board.piece_type_at(to_sq) or chess.PAWN)
-            )
-            if not move.promotion and (stand_pat + PIECE_VALUES[victim] + DELTA_PRUNING < alpha):
-                continue
-            attacker = board.piece_type_at(move.from_square) or chess.PAWN
-            score = TT_MOVE_SCORE if move == tt_move else MVV_LVA[victim][attacker]
-            if move.promotion == chess.QUEEN:
-                score += 10_000
-            candidates.append((score, move))
-
-        turn = board.turn
-        promo_rank = chess.BB_RANK_7 if turn == chess.WHITE else chess.BB_RANK_2
-        pawn_promos = board.pawns & board.occupied_co[turn] & promo_rank
-        if pawn_promos:
-            step = 8 if turn == chess.WHITE else -8
-            while pawn_promos:
-                from_sq = (pawn_promos & -pawn_promos).bit_length() - 1
-                to_sq = from_sq + step
-                if board.piece_at(to_sq) is None:
-                    m = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
-                    if board.is_legal(m):
-                        candidates.append((10_000, m))
-                pawn_promos &= pawn_promos - 1
-
-        if not candidates:
-            if next(board.generate_legal_moves(), None) is None:
-                best_score = 0
-            bound = Bound.EXACT if best_score > alpha_orig else Bound.UPPER
-            self.tt.store(
-                current_hash,
-                None,
-                score_to_tt(best_score, ply),
-                required_depth,
-                bound,
-                stand_pat,
-            )
-            return best_score
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        best_move = None
-        for _, move in candidates:
-            child_hash = push_hash(board, move, current_hash)
-            score = -self._quiescence(board, -beta, -alpha, ply + 1, child_hash, None, qply + 1)
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-            if score > alpha:
-                alpha = score
-            if alpha >= beta:
-                break
-
-        bound = (
-            Bound.UPPER
-            if best_score <= alpha_orig
-            else (Bound.LOWER if best_score >= beta else Bound.EXACT)
-        )
-        self.tt.store(
-            current_hash,
-            best_move,
-            score_to_tt(best_score, ply),
-            required_depth,
-            bound,
-            stand_pat,
-        )
-        return best_score
-
-    @staticmethod
-    def _is_draw(board: chess.Board) -> bool:
-        if board.halfmove_clock >= 100 and board.is_fifty_moves():
-            return True
-        if board.halfmove_clock >= 4 and len(board.move_stack) >= 4 and board.is_repetition(2):
-            return True
-        return not (board.pawns | board.rooks | board.queens) and board.is_insufficient_material()
-
-    @staticmethod
-    def _format_score(score: int) -> str:
-        if abs(score) > MATE_THRESHOLD:
-            plies = MATE_SCORE - abs(score)
-            mate_in = (plies + 1) // 2
-            return f"mate {mate_in}" if score > 0 else f"mate -{mate_in}"
-        return f"cp {score}"
+    def _record_selected_move(self, board: Board, move: int) -> None:
+        if move == NO_MOVE:
+            return
+        self._pending_position = board.copy()
+        self._pending_position.make_move(move)
+        self._game_hashes.append(self._pending_position.hash)

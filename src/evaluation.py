@@ -1,4 +1,4 @@
-from typing import Final
+from typing import Any, Final
 
 import chess
 import numpy as np
@@ -6,7 +6,8 @@ from numba import njit
 
 MG_PIECE_VALUES: Final[tuple[int, ...]] = (82, 337, 365, 477, 1025, 0)
 EG_PIECE_VALUES: Final[tuple[int, ...]] = (94, 281, 297, 512, 936, 0)
-GAMEPHASE_INC: Final[np.ndarray] = np.array((0, 155, 305, 405, 1050, 0), dtype=np.int16)
+GAMEPHASE_INC: Final[tuple[int, ...]] = (0, 155, 305, 405, 1050, 0)
+_GAMEPHASE_INC_NP: Final[np.ndarray] = np.array(GAMEPHASE_INC, dtype=np.int16)
 
 # fmt: off
 MG_PAWN_TABLE: Final[tuple[int, ...]] = (
@@ -166,25 +167,23 @@ EG_PESTO_TABLES: Final[tuple[tuple[int, ...], ...]] = (
 # piece: 0..5 (Pawn, Knight, Bishop, Rook, Queen, King)
 # ---------------------------------------------------------------------------
 
-MG_TABLE: Final[np.ndarray] = np.array(
-    [
-        # White (c = 0)
-        [[MG_PIECE_VALUES[p] + MG_PESTO_TABLES[p][sq ^ 56] for sq in range(64)] for p in range(6)],
-        # Black (c = 1)
-        [[MG_PIECE_VALUES[p] + MG_PESTO_TABLES[p][sq] for sq in range(64)] for p in range(6)],
-    ],
-    dtype=np.int16,
+MG_TABLE: Final[tuple[tuple[tuple[int, ...], ...], ...]] = (
+    tuple(
+        tuple(MG_PIECE_VALUES[p] + MG_PESTO_TABLES[p][sq ^ 56] for sq in range(64))
+        for p in range(6)
+    ),
+    tuple(tuple(MG_PIECE_VALUES[p] + MG_PESTO_TABLES[p][sq] for sq in range(64)) for p in range(6)),
 )
 
-EG_TABLE: Final[np.ndarray] = np.array(
-    [
-        # White (c = 0)
-        [[EG_PIECE_VALUES[p] + EG_PESTO_TABLES[p][sq ^ 56] for sq in range(64)] for p in range(6)],
-        # Black (c = 1)
-        [[EG_PIECE_VALUES[p] + EG_PESTO_TABLES[p][sq] for sq in range(64)] for p in range(6)],
-    ],
-    dtype=np.int16,
+EG_TABLE: Final[tuple[tuple[tuple[int, ...], ...], ...]] = (
+    tuple(
+        tuple(EG_PIECE_VALUES[p] + EG_PESTO_TABLES[p][sq ^ 56] for sq in range(64))
+        for p in range(6)
+    ),
+    tuple(tuple(EG_PIECE_VALUES[p] + EG_PESTO_TABLES[p][sq] for sq in range(64)) for p in range(6)),
 )
+_MG_TABLE_NP: Final[np.ndarray] = np.array(MG_TABLE, dtype=np.int16)
+_EG_TABLE_NP: Final[np.ndarray] = np.array(EG_TABLE, dtype=np.int16)
 
 GAMEPHASE_SUM: Final[int] = int(
     sum(inc * count * 2 for inc, count in zip(GAMEPHASE_INC, (8, 2, 2, 2, 1, 1), strict=True))
@@ -200,8 +199,10 @@ ROOK_SEMI_OPEN_MG: Final[int] = 5
 ROOK_SEMI_OPEN_EG: Final[int] = 3
 ROOK_OPEN_MG: Final[int] = 10
 ROOK_OPEN_EG: Final[int] = 6
-PASSED_PAWN_MG: Final[np.ndarray] = np.array((0, 0, 3, 7, 12, 20, 32, 0), dtype=np.int16)
-PASSED_PAWN_EG: Final[np.ndarray] = np.array((0, 0, 6, 12, 22, 38, 65, 0), dtype=np.int16)
+PASSED_PAWN_MG: Final[tuple[int, ...]] = (0, 0, 3, 7, 12, 20, 32, 0)
+PASSED_PAWN_EG: Final[tuple[int, ...]] = (0, 0, 6, 12, 22, 38, 65, 0)
+_PASSED_PAWN_MG_NP: Final[np.ndarray] = np.array(PASSED_PAWN_MG, dtype=np.int16)
+_PASSED_PAWN_EG_NP: Final[np.ndarray] = np.array(PASSED_PAWN_EG, dtype=np.int16)
 
 FILE_MASKS: Final[np.ndarray] = np.asarray(chess.BB_FILES, dtype=np.uint64)
 ADJACENT_FILE_MASKS: Final[np.ndarray] = np.asarray(
@@ -301,12 +302,12 @@ def _evaluate_kernel(
                 square = _LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)]
 
                 if color_index == 0:
-                    mg_white += MG_TABLE[color_index, piece_index, square]
-                    eg_white += EG_TABLE[color_index, piece_index, square]
+                    mg_white += _MG_TABLE_NP[color_index, piece_index, square]
+                    eg_white += _EG_TABLE_NP[color_index, piece_index, square]
                 else:
-                    mg_black += MG_TABLE[color_index, piece_index, square]
-                    eg_black += EG_TABLE[color_index, piece_index, square]
-                game_phase += GAMEPHASE_INC[piece_index]
+                    mg_black += _MG_TABLE_NP[color_index, piece_index, square]
+                    eg_black += _EG_TABLE_NP[color_index, piece_index, square]
+                game_phase += _GAMEPHASE_INC_NP[piece_index]
 
                 bb ^= lsb
 
@@ -337,8 +338,8 @@ def _evaluate_kernel(
                 relative_rank = np.int64(square) >> np.int64(3)
                 if color_index != 0:
                     relative_rank = np.int64(7) - relative_rank
-                mg_bonus += PASSED_PAWN_MG[relative_rank]
-                eg_bonus += PASSED_PAWN_EG[relative_rank]
+                mg_bonus += _PASSED_PAWN_MG_NP[relative_rank]
+                eg_bonus += _PASSED_PAWN_EG_NP[relative_rank]
             bb ^= lsb
 
         bb = rooks & occupancy
@@ -380,7 +381,9 @@ def _evaluate_kernel(
     return final_score, int(mg_phase)
 
 
-def evaluate(board: chess.Board) -> int:
+def evaluate(board: Any) -> int:
+    if hasattr(board, "evaluate"):
+        return int(board.evaluate())
     score, _ = _evaluate_kernel(
         np.uint64(board.pawns),
         np.uint64(board.knights),
@@ -395,7 +398,11 @@ def evaluate(board: chess.Board) -> int:
     return score
 
 
-def evaluate_with_phase(board: chess.Board) -> tuple[int, float]:
+def evaluate_with_phase(board: Any) -> tuple[int, float]:
+    if hasattr(board, "evaluate"):
+        score = board.evaluate()
+        phase = min(board.game_phase, GAMEPHASE_SUM) / GAMEPHASE_SUM
+        return score, phase
     score, raw_phase = _evaluate_kernel(
         np.uint64(board.pawns),
         np.uint64(board.knights),

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import chess
 import chess.engine
 
-# Import your bot architecture
+from src.board import Board, move_to_uci
 from src.search import Bot
 
 
@@ -75,7 +75,9 @@ class EvalStats:
             (self.wins * (1 - p) ** 2 + self.draws * (0.5 - p) ** 2 + self.losses * (0 - p) ** 2)
             / self.total_games
         )
-        error_margin = (1.96 * stdev / math.sqrt(self.total_games)) * (400.0 / (math.log(10) * p * (1 - p)))
+        error_margin = (1.96 * stdev / math.sqrt(self.total_games)) * (
+            400.0 / (math.log(10) * p * (1 - p))
+        )
 
         return bot_elo, error_margin
 
@@ -99,7 +101,10 @@ class AdaptiveEvaluator:
         stats = EvalStats()
 
         print(f"Starting Engine Match ({total_games} Games)")
-        print(f"Time Control: {self.base_time_ms}ms + {self.inc_ms}ms inc | Adaptive Skill: {adapt_skill}")
+        print(
+            f"Time Control: {self.base_time_ms}ms + {self.inc_ms}ms inc "
+            f"| Adaptive Skill: {adapt_skill}"
+        )
         print("=" * 65)
 
         for game_idx in range(1, total_games + 1):
@@ -107,7 +112,11 @@ class AdaptiveEvaluator:
             bot_color = chess.WHITE if game_idx % 2 != 0 else chess.BLACK
             color_str = "White" if bot_color == chess.WHITE else "Black"
 
-            print(f"Game {game_idx:02d}/{total_games:02d} | Bot ({color_str}) vs Stockfish (Skill {self.current_skill})", end=" | ")
+            print(
+                f"Game {game_idx:02d}/{total_games:02d} | "
+                f"Bot ({color_str}) vs Stockfish (Skill {self.current_skill})",
+                end=" | ",
+            )
 
             res = self._play_game(game_idx, bot_color)
             stats.add_result(res)
@@ -121,7 +130,8 @@ class AdaptiveEvaluator:
 
             print(
                 f"Result: {res.result} ({res.termination_reason}) | "
-                f"Max Move Time: {res.bot_max_move_time_ms:.0f}ms | Violations: {res.time_violations}"
+                f"Max Move Time: {res.bot_max_move_time_ms:.0f}ms | "
+                f"Violations: {res.time_violations}"
             )
 
         self._print_summary(stats)
@@ -180,8 +190,10 @@ class AdaptiveEvaluator:
 
                 start_t = time.perf_counter()
                 try:
-                    # Pass remaining clock to bot
-                    move = bot.get_best_move(board, time_left_ms=int(bot_clock))
+                    # Pass custom board to bot
+                    custom_board = Board.from_fen(board.fen())
+                    move_int = bot.get_best_move(custom_board, time_left_ms=int(bot_clock))
+                    move = chess.Move.from_uci(move_to_uci(move_int))
                 except Exception as e:
                     engine.quit()
                     return GameResult(
@@ -189,7 +201,7 @@ class AdaptiveEvaluator:
                         bot_color=bot_color,
                         result="0-1" if bot_color == chess.WHITE else "1-0",
                         bot_score=0.0,
-                        termination_reason=f"crash ({type(e).__name__})",  #[cite: 1]
+                        termination_reason=f"crash ({type(e).__name__})",
                         stockfish_skill=self.current_skill,
                         bot_time_left_ms=bot_clock,
                         stockfish_time_left_ms=sf_clock,
@@ -201,7 +213,6 @@ class AdaptiveEvaluator:
                 max_move_time = max(max_move_time, elapsed_ms)
 
                 # STRESS-TEST TIMING CHECK:
-                # Check if single move execution exceeded available time + allowed tolerance
                 if elapsed_ms > (bot_clock + self.inc_ms + self.tolerance_buffer_ms):
                     time_violations += 1
 
@@ -214,7 +225,7 @@ class AdaptiveEvaluator:
                         bot_color=bot_color,
                         result="0-1" if bot_color == chess.WHITE else "1-0",
                         bot_score=0.0,
-                        termination_reason="flag",  #[cite: 1]
+                        termination_reason="flag",
                         stockfish_skill=self.current_skill,
                         bot_time_left_ms=0.0,
                         stockfish_time_left_ms=sf_clock,
@@ -232,7 +243,7 @@ class AdaptiveEvaluator:
                         bot_color=bot_color,
                         result="0-1" if bot_color == chess.WHITE else "1-0",
                         bot_score=0.0,
-                        termination_reason="illegal",  #[cite: 1]
+                        termination_reason="illegal",
                         stockfish_skill=self.current_skill,
                         bot_time_left_ms=bot_clock,
                         stockfish_time_left_ms=sf_clock,
@@ -247,8 +258,12 @@ class AdaptiveEvaluator:
                 start_t = time.perf_counter()
 
                 limit = chess.engine.Limit(
-                    white_clock=sf_clock / 1000.0 if board.turn == chess.WHITE else bot_clock / 1000.0,
-                    black_clock=bot_clock / 1000.0 if board.turn == chess.WHITE else sf_clock / 1000.0,
+                    white_clock=sf_clock / 1000.0
+                    if board.turn == chess.WHITE
+                    else bot_clock / 1000.0,
+                    black_clock=bot_clock / 1000.0
+                    if board.turn == chess.WHITE
+                    else sf_clock / 1000.0,
                     white_inc=self.inc_ms / 1000.0,
                     black_inc=self.inc_ms / 1000.0,
                 )
@@ -258,32 +273,45 @@ class AdaptiveEvaluator:
                 sf_clock = max(0.0, sf_clock - elapsed_ms + self.inc_ms)
 
                 if sf_res.move is None:
-                    break
+                    engine.quit()
+                    return GameResult(
+                        game_id=game_id,
+                        bot_color=bot_color,
+                        result="1-0" if bot_color == chess.WHITE else "0-1",
+                        bot_score=1.0,
+                        termination_reason="stockfish_forfeit",
+                        stockfish_skill=self.current_skill,
+                        bot_time_left_ms=bot_clock,
+                        stockfish_time_left_ms=sf_clock,
+                        total_moves=total_moves,
+                        time_violations=time_violations,
+                        bot_max_move_time_ms=max_move_time,
+                    )
+
                 board.push(sf_res.move)
 
         engine.quit()
 
-        # Parse match conclusion
+        # Determine outcome
         outcome = board.outcome(claim_draw=True)
-        if outcome is None or outcome.winner is None:
+        assert outcome is not None
+
+        if outcome.winner is None:
+            res_str = "1/2-1/2"
             score = 0.5
-            result_str = "1/2-1/2"
-            reason = outcome.termination.name.lower() if outcome else "draw"  #[cite: 1]
         elif outcome.winner == bot_color:
+            res_str = "1-0" if bot_color == chess.WHITE else "0-1"
             score = 1.0
-            result_str = "1-0" if bot_color == chess.WHITE else "0-1"
-            reason = outcome.termination.name.lower()  #[cite: 1]
         else:
+            res_str = "0-1" if bot_color == chess.WHITE else "1-0"
             score = 0.0
-            result_str = "0-1" if bot_color == chess.WHITE else "1-0"
-            reason = outcome.termination.name.lower()  #[cite: 1]
 
         return GameResult(
             game_id=game_id,
             bot_color=bot_color,
-            result=result_str,
+            result=res_str,
             bot_score=score,
-            termination_reason=reason,
+            termination_reason=outcome.termination.name.lower(),
             stockfish_skill=self.current_skill,
             bot_time_left_ms=bot_clock,
             stockfish_time_left_ms=sf_clock,
@@ -293,40 +321,47 @@ class AdaptiveEvaluator:
         )
 
     def _print_summary(self, stats: EvalStats) -> None:
-        estimated_elo, err = stats.calculate_elo(self.current_skill)
-        print("\n================ BENCHMARK SUMMARY ================")
-        print(f"Total Match Games:    {stats.total_games}")
-        print(f"Record:               {stats.wins}W / {stats.draws}D / {stats.losses}L ({stats.score_percentage * 100:.1f}%)")
-        print(f"Ending SF Skill:      {self.current_skill}")
-        print(f"Estimated Bot Elo:    ~{estimated_elo:.0f} +/- {err:.0f}")
-        print(f"Flag Losses:          {stats.flag_failures}")
-        print(f"Timing Violations:    {stats.total_time_violations}")
-        print("==================================================")
+        print("\n" + "=" * 65)
+        print("MATCH EVALUATION SUMMARY")
+        print("=" * 65)
+        print(f"Total Games Played:     {stats.total_games}")
+        print(f"Record (W-L-D):         {stats.wins} - {stats.losses} - {stats.draws}")
+        print(f"Score:                  {stats.score_percentage * 100:.1f}%")
+        print(f"Total Time Violations:  {stats.total_time_violations}")
+        print(f"Flag Rate Failures:     {stats.flag_failures}")
+
+        elo, margin = stats.calculate_elo(self.current_skill)
+        print(
+            f"Estimated Bot Rating:   {elo:.0f} ± {margin:.0f} Elo "
+            f"(vs SF Skill {self.current_skill})"
+        )
+        print("=" * 65 + "\n")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Adaptive Stockfish Evaluator with Time Stress Testing.")
-    parser.add_argument("--stockfish-path", type=str, default="stockfish", help="Path to Stockfish binary.")
-    parser.add_argument("--games", type=int, default=100, help="Number of games to run.")
-    parser.add_argument("--skill", type=int, default=4, help="Starting Stockfish Skill Level (0-20).")
-
-    # Stress-test presets
-    parser.add_argument("--stress_test", choices=["bullet", "sudden_death", "std"], default="bullet", help="Time stress test mode")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Evaluate engine against Stockfish using time controls."
+    )
+    parser.add_argument("--stockfish", default="stockfish", help="Path to Stockfish binary")
+    parser.add_argument("--games", type=int, default=12, help="Number of games to play")
+    parser.add_argument("--skill", type=int, default=3, help="Initial Stockfish skill level (0-20)")
+    parser.add_argument("--base-time", type=int, default=2000, help="Base time per game (ms)")
+    parser.add_argument("--inc", type=int, default=50, help="Time increment per move (ms)")
+    parser.add_argument(
+        "--static-skill", action="store_true", help="Disable adaptive skill adjustments"
+    )
 
     args = parser.parse_args()
 
-    # Configure time controls for stress tests
-    if args.stress_test == "bullet":
-        base_ms, inc_ms = 1000, 50
-    elif args.stress_test == "sudden_death":
-        base_ms, inc_ms = 2000, 0
-    elif args.stress_test == "std":
-        base_ms, inc_ms = 120_000, 500 # 2m 0.5s increment
-
     evaluator = AdaptiveEvaluator(
-        stockfish_path=args.stockfish_path,
+        stockfish_path=args.stockfish,
         initial_skill=args.skill,
-        base_time_ms=base_ms,
-        inc_ms=inc_ms,
+        base_time_ms=args.base_time,
+        inc_ms=args.inc,
     )
-    evaluator.run_benchmark(total_games=args.games, adapt_skill=False)
+
+    evaluator.run_benchmark(total_games=args.games, adapt_skill=not args.static_skill)
+
+
+if __name__ == "__main__":
+    main()
