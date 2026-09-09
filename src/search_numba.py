@@ -385,7 +385,7 @@ def alpha_beta(
     # Static eval
     if in_check:
         static_eval = -INF
-    elif found and tt_static_val != 0:
+    elif found:
         static_eval = tt_static_val
     else:
         static_eval = evaluate(state)

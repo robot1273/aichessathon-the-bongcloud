@@ -56,28 +56,36 @@ class EvalStats:
             return 0.0
         return (self.wins + 0.5 * self.draws) / self.total_games
 
-    def calculate_elo(self, sf_skill: int) -> tuple[float, float]:
-        """Calculates estimated absolute Elo based on Stockfish Skill level anchor."""
+    def calculate_elo(self) -> tuple[float, float]:
+        """Fit a rating against the skill level actually used in every game."""
         if self.total_games == 0:
             return 0.0, 0.0
 
-        p = max(0.001, min(0.999, self.score_percentage))
+        opponent_elos = [1320.0 + res.stockfish_skill * 93.5 for res in self.results]
+        target_score = max(0.001, min(0.999, self.score_percentage))
 
-        # Approximate Stockfish skill level to base Elo (Skill 0 ~= 1320, Skill 20 ~= 3190)
-        sf_estimated_elo = 1320 + (sf_skill * 93.5)
+        def expected_score(rating: float) -> float:
+            total = 0.0
+            for opponent_elo in opponent_elos:
+                total += 1.0 / (1.0 + 10.0 ** ((opponent_elo - rating) / 400.0))
+            return total / self.total_games
 
-        # Relative Elo formula (Logistic distribution)
-        elo_diff = -400.0 * math.log10(1.0 / p - 1.0)
-        bot_elo = sf_estimated_elo + elo_diff
+        lower, upper = -1000.0, 5000.0
+        for _ in range(60):
+            midpoint = (lower + upper) / 2.0
+            if expected_score(midpoint) < target_score:
+                lower = midpoint
+            else:
+                upper = midpoint
 
-        # Standard Error (95% confidence bounds)
-        stdev = math.sqrt(
-            (self.wins * (1 - p) ** 2 + self.draws * (0.5 - p) ** 2 + self.losses * (0 - p) ** 2)
-            / self.total_games
+        bot_elo = (lower + upper) / 2.0
+        information = sum(
+            (math.log(10.0) / 400.0) ** 2
+            * (1.0 / (1.0 + 10.0 ** ((opponent_elo - bot_elo) / 400.0)))
+            * (1.0 - 1.0 / (1.0 + 10.0 ** ((opponent_elo - bot_elo) / 400.0)))
+            for opponent_elo in opponent_elos
         )
-        error_margin = (1.96 * stdev / math.sqrt(self.total_games)) * (
-            400.0 / (math.log(10) * p * (1 - p))
-        )
+        error_margin = 1.96 / math.sqrt(information) if information else 0.0
 
         return bot_elo, error_margin
 
@@ -128,8 +136,11 @@ class AdaptiveEvaluator:
                 elif res.bot_score == 0.0 and self.current_skill > 0:
                     self.current_skill -= 1
 
+            bot_result = (
+                "win" if res.bot_score == 1.0 else "draw" if res.bot_score == 0.5 else "loss"
+            )
             print(
-                f"Result: {res.result} ({res.termination_reason}) | "
+                f"Bot: {bot_result} | Board: {res.result} ({res.termination_reason}) | "
                 f"Max Move Time: {res.bot_max_move_time_ms:.0f}ms | "
                 f"Violations: {res.time_violations}"
             )
@@ -330,10 +341,11 @@ class AdaptiveEvaluator:
         print(f"Total Time Violations:  {stats.total_time_violations}")
         print(f"Flag Rate Failures:     {stats.flag_failures}")
 
-        elo, margin = stats.calculate_elo(self.current_skill)
+        elo, margin = stats.calculate_elo()
+        skills = [res.stockfish_skill for res in stats.results]
         print(
             f"Estimated Bot Rating:   {elo:.0f} ± {margin:.0f} Elo "
-            f"(vs SF Skill {self.current_skill})"
+            f"(vs SF Skills {min(skills)}-{max(skills)})"
         )
         print("=" * 65 + "\n")
 
@@ -345,7 +357,7 @@ def main() -> None:
     parser.add_argument("--stockfish", default="stockfish", help="Path to Stockfish binary")
     parser.add_argument("--games", type=int, default=12, help="Number of games to play")
     parser.add_argument("--skill", type=int, default=3, help="Initial Stockfish skill level (0-20)")
-    parser.add_argument("--base-time", type=int, default=2000, help="Base time per game (ms)")
+    parser.add_argument("--base-time", type=int, default=9000, help="Base time per game (ms)")
     parser.add_argument("--inc", type=int, default=50, help="Time increment per move (ms)")
     parser.add_argument(
         "--static-skill", action="store_true", help="Disable adaptive skill adjustments"

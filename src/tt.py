@@ -87,15 +87,25 @@ def store_tt(
 ) -> None:
     idx = hash_val & (tt_hash.size - 1)
     old_hash = tt_hash[idx]
+    current_age &= 0xFF
 
     replace = False
-    if tt_bound[idx] == BOUND_NONE or old_hash != hash_val:
+    if tt_bound[idx] == BOUND_NONE:
         replace = True
+    elif old_hash != hash_val:
+        old_depth = tt_depth[idx]
+        age_diff = (current_age - tt_age[idx]) & 0xFF
+        # Retain deep entries unless they are stale. Direct-mapped tables see
+        # frequent collisions, so unconditional replacement discards the work
+        # that gives iterative deepening and cross-move reuse their value.
+        replace = age_diff > 2 or depth >= old_depth - 2
     else:
         old_depth = tt_depth[idx]
         old_age = tt_age[idx]
-        age_diff = current_age - old_age
-        if depth >= old_depth or age_diff > 2 or bound == BOUND_EXACT:
+        age_diff = (current_age - old_age) & 0xFF
+        if depth > old_depth or age_diff > 2:
+            replace = True
+        elif depth == old_depth and bound == BOUND_EXACT and tt_bound[idx] != BOUND_EXACT:
             replace = True
 
     if replace:

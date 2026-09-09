@@ -144,7 +144,11 @@ class TestBoard(unittest.TestCase):
             self.assertEqual(
                 our_moves,
                 py_moves,
-                f"Movegen mismatch for FEN: {fen}\nOur: {sorted(our_moves)}\nPy:  {sorted(py_moves)}",
+                (
+                    f"Movegen mismatch for FEN: {fen}\n"
+                    f"Our: {sorted(our_moves)}\n"
+                    f"Py:  {sorted(py_moves)}"
+                ),
             )
 
     def test_zobrist_matches_polyglot(self) -> None:

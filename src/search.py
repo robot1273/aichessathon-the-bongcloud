@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import time
 from typing import Any
 
 import numpy as np
@@ -39,6 +38,10 @@ class SearchStats:
 
 
 INCREMENT_S = 0.5
+STABLE_WIN_SCORE = 600
+STABLE_SCORE_DELTA = 35
+STABLE_WIN_ITERATIONS = 3
+ITERATION_SAFETY_FACTOR = 1.10
 
 
 class Bot:
@@ -104,8 +107,11 @@ class Bot:
         movetime_ms: int | None = None,
         verbose: bool = False,
         callback: Any | None = None,
+        started_at: float | None = None,
     ) -> int:
         self.current_age += 1
+        # Include all per-move Python work in the budget enforced by the runner.
+        self.time_mgr.start(time_left_ms, board, movetime_ms, started_at)
         self._record_position(board)
 
         # Check for immediate return on forced moves or no moves
@@ -125,12 +131,16 @@ class Bot:
             self._record_selected_move(board, legal_moves[0])
             return legal_moves[0]
 
-        # Configure time management
-        self.time_mgr.start(time_left_ms, board, movetime_ms)
-        hard_limit_s = self.time_mgr._hard_limit
+        if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
+            self.best_move = legal_moves[0]
+            self.nodes = 0
+            self.completed_depth = 0
+            self.best_score = 0
+            self._record_selected_move(board, legal_moves[0])
+            return legal_moves[0]
 
         state = board_to_state(board)
-        start_t = time.perf_counter()
+        start_t = self.time_mgr.elapsed()
 
         # Build game history for repetition checking. The current root is last.
         hash_history = np.zeros(MAX_PLY, dtype=np.uint64)
@@ -138,19 +148,23 @@ class Bot:
         for i in range(hist_len):
             hash_history[i] = np.uint64(self._game_hashes[-hist_len + i])
 
-        # Setup deadline in clock ticks
-        start_ticks = clock()
+        # The search measures CPU time, while the runner measures wall time.
+        # Convert the remaining complete-request budget at every deadline update.
         if depth is not None:
             # Fixed depth: no deadline unless movetime_ms specified
-            deadline_ticks = (
-                0 if movetime_ms is None else start_ticks + int(hard_limit_s * 1_000_000)
-            )
+            deadline_ticks = 0
+            if movetime_ms is not None:
+                deadline_ticks = clock() + int(
+                    max(self.time_mgr.hard_limit - self.time_mgr.elapsed(), 0.0) * 1_000_000
+                )
         else:
-            deadline_ticks = start_ticks + int(hard_limit_s * 1_000_000)
+            deadline_ticks = clock() + int(
+                max(self.time_mgr.hard_limit - self.time_mgr.elapsed(), 0.0) * 1_000_000
+            )
 
         self.stats[0] = 0  # nodes
         self.stats[1] = 0  # aborted flag
-        self.stats[2] = start_ticks
+        self.stats[2] = clock()
         self.stats[3] = deadline_ticks
 
         # Clear killer heuristics per search; age history
@@ -159,13 +173,28 @@ class Bot:
 
         best_move = legal_moves[0]
         best_score = 0
-        prev_score = 0
+        prev_score: int | None = None
+        prev_move = NO_MOVE
+        stable_iterations = 0
+        iteration_times: list[float] = []
         completed_depth = 0
         max_d = depth if depth is not None else 64
 
         for d in range(1, max_d + 1):
             if d > 1 and depth is None and self.time_mgr.should_stop_iterating():
                 break
+
+            if d >= 5 and depth is None and len(iteration_times) >= 2:
+                previous_time = max(iteration_times[-2], 0.0001)
+                growth = iteration_times[-1] / previous_time
+                predicted_time = iteration_times[-1] * min(max(growth, 1.6), 3.0)
+                if (
+                    self.time_mgr.elapsed() + predicted_time * ITERATION_SAFETY_FACTOR
+                    >= self.time_mgr.hard_limit
+                ):
+                    break
+
+            iteration_start = self.time_mgr.elapsed()
 
             # Aspiration window for depth >= 5
             if d >= 5 and abs(best_score) < MATE_THRESHOLD:
@@ -191,40 +220,54 @@ class Bot:
 
                 if not aborted and score <= alpha:
                     # Fail low: widen window to -INF
-                    score, move, aborted = search_root(
-                        state,
-                        self.undo_stack,
-                        self.moves_stack,
-                        self.scores_stack,
-                        -INF,
-                        beta,
-                        d,
-                        self.killers,
-                        self.history,
-                        self.stats,
-                        hash_history,
-                        hist_len,
-                        self.current_age,
-                        *self.tt_arrays,
-                    )
+                    retry_time = self.time_mgr.elapsed() - iteration_start
+                    if (
+                        self.time_mgr.elapsed() + retry_time * ITERATION_SAFETY_FACTOR
+                        >= self.time_mgr.hard_limit
+                    ):
+                        aborted = True
+                    else:
+                        score, move, aborted = search_root(
+                            state,
+                            self.undo_stack,
+                            self.moves_stack,
+                            self.scores_stack,
+                            -INF,
+                            beta,
+                            d,
+                            self.killers,
+                            self.history,
+                            self.stats,
+                            hash_history,
+                            hist_len,
+                            self.current_age,
+                            *self.tt_arrays,
+                        )
                 elif not aborted and score >= beta:
                     # Fail high: widen window to INF
-                    score, move, aborted = search_root(
-                        state,
-                        self.undo_stack,
-                        self.moves_stack,
-                        self.scores_stack,
-                        alpha,
-                        INF,
-                        d,
-                        self.killers,
-                        self.history,
-                        self.stats,
-                        hash_history,
-                        hist_len,
-                        self.current_age,
-                        *self.tt_arrays,
-                    )
+                    retry_time = self.time_mgr.elapsed() - iteration_start
+                    if (
+                        self.time_mgr.elapsed() + retry_time * ITERATION_SAFETY_FACTOR
+                        >= self.time_mgr.hard_limit
+                    ):
+                        aborted = True
+                    else:
+                        score, move, aborted = search_root(
+                            state,
+                            self.undo_stack,
+                            self.moves_stack,
+                            self.scores_stack,
+                            alpha,
+                            INF,
+                            d,
+                            self.killers,
+                            self.history,
+                            self.stats,
+                            hash_history,
+                            hist_len,
+                            self.current_age,
+                            *self.tt_arrays,
+                        )
             else:
                 score, move, aborted = search_root(
                     state,
@@ -250,14 +293,30 @@ class Bot:
                 best_move = move
                 best_score = score
             completed_depth = d
+            iteration_times.append(self.time_mgr.elapsed() - iteration_start)
 
             self.time_mgr.extend_if_unstable(prev_score, score)
-            if depth is None:
-                self.stats[3] = start_ticks + int(self.time_mgr._hard_limit * 1_000_000)
+            if (
+                move == prev_move
+                and prev_score is not None
+                and abs(score - prev_score) <= STABLE_SCORE_DELTA
+            ):
+                stable_iterations += 1
+            else:
+                stable_iterations = 1
+
+            if best_score >= STABLE_WIN_SCORE and stable_iterations >= STABLE_WIN_ITERATIONS:
+                self.time_mgr.shorten_for_stable_win()
+
+            if depth is None or movetime_ms is not None:
+                self.stats[3] = clock() + int(
+                    max(self.time_mgr.hard_limit - self.time_mgr.elapsed(), 0.0) * 1_000_000
+                )
             prev_score = score
+            prev_move = move
 
             nodes = int(self.stats[0])
-            elapsed = max(time.perf_counter() - start_t, 0.0001)
+            elapsed = max(self.time_mgr.elapsed() - start_t, 0.0001)
             nps = int(nodes / elapsed)
 
             if verbose or callback:
