@@ -1,12 +1,25 @@
 import unittest
+from dataclasses import replace
 
 from src.board import Board
-from src.time_manager import TimeManager
+from src.time_manager import DEFAULT_TIME_CONFIG, TimeManager
 
 
 class TimeManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.board = Board.from_fen()
+
+    def test_config_controls_instability_threshold(self) -> None:
+        config = replace(DEFAULT_TIME_CONFIG, instability_threshold=500)
+        manager = TimeManager(increment_s=0.5, config=config)
+        manager.start(120_000, self.board)
+        soft_limit = manager.soft_limit
+        hard_limit = manager.hard_limit
+
+        manager.extend_if_unstable(0, 400)
+
+        self.assertEqual(manager.soft_limit, soft_limit)
+        self.assertEqual(manager.hard_limit, hard_limit)
 
     def test_initial_score_does_not_extend_budget(self) -> None:
         manager = TimeManager(increment_s=0.5)

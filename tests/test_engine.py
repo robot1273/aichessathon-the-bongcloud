@@ -1,5 +1,6 @@
 import random
 import unittest
+from dataclasses import replace
 
 import chess.polyglot
 import numpy as np
@@ -8,8 +9,9 @@ from src import board_primitives
 from src.board import Board, move_to_uci
 from src.constants import INF, MAX_PLY, STATE_SIZE
 from src.evaluation import evaluate_with_phase
-from src.search import Bot
+from src.search import Bot, is_root_ambiguous
 from src.search_numba import board_to_state, is_draw
+from src.time_manager import DEFAULT_TIME_CONFIG
 from src.zobrist import calculate_hash, has_legal_en_passant
 
 KIWIPETE = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
@@ -42,6 +44,15 @@ class SearchTests(unittest.TestCase):
                 is_draw(state, undo_stack, ply + 1, history, len(history)), expected_draw
             )
 
+    def test_zero_pvs_bound_can_be_excluded_from_root_uncertainty(self) -> None:
+        baseline = DEFAULT_TIME_CONFIG
+        positive_only = replace(baseline, require_positive_root_gap=True)
+
+        self.assertTrue(is_root_ambiguous(0, baseline))
+        self.assertFalse(is_root_ambiguous(0, positive_only))
+        self.assertTrue(is_root_ambiguous(1, positive_only))
+        self.assertFalse(is_root_ambiguous(51, positive_only))
+
     def test_completed_search_reports_root_score_gap(self) -> None:
         bot = Bot()
         board = Board.from_fen()
@@ -50,6 +61,10 @@ class SearchTests(unittest.TestCase):
 
         self.assertGreater(bot.runner_up_score, -INF)
         self.assertEqual(bot.root_score_gap, bot.best_score - bot.runner_up_score)
+        self.assertIsNotNone(bot.last_timing)
+        assert bot.last_timing is not None
+        self.assertEqual(bot.last_timing.completed_depth, 2)
+        self.assertEqual(bot.last_timing.root_gap, bot.root_score_gap)
 
 
 class EvaluationTests(unittest.TestCase):

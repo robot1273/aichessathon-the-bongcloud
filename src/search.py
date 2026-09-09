@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -13,7 +14,7 @@ from src.search_numba import (
     board_to_state,
     search_root,
 )
-from src.time_manager import TimeManager
+from src.time_manager import DEFAULT_TIME_CONFIG, TimeConfig, TimeManager
 from src.tt import create_tt_arrays
 
 # Libc clock for microsecond time tracking
@@ -38,11 +39,44 @@ class SearchStats:
 
 
 INCREMENT_S = 0.5
-STABLE_WIN_SCORE = 600
-STABLE_SCORE_DELTA = 35
-STABLE_WIN_ITERATIONS = 3
-ITERATION_SAFETY_FACTOR = 1.10
-ROOT_UNCERTAINTY_GAP = 50
+
+
+@dataclass(frozen=True)
+class MoveTiming:
+    clock_before_s: float
+    soft_limit_s: float
+    hard_limit_s: float
+    elapsed_s: float
+    completed_depth: int
+    aborted_depth: int | None
+    predicted_next_s: float
+    aspiration_used: bool
+    aspiration_failed: bool
+    aspiration_reserve_skip: bool
+    root_gap: int | None
+    band: str
+    policy: str
+    stop_reason: str
+
+    def format(self) -> str:
+        aborted = "-" if self.aborted_depth is None else str(self.aborted_depth)
+        gap = "-" if self.root_gap is None else str(self.root_gap)
+        return (
+            "timing "
+            f"clock={self.clock_before_s:.3f}s soft={self.soft_limit_s:.3f}s "
+            f"hard={self.hard_limit_s:.3f}s elapsed={self.elapsed_s:.3f}s "
+            f"depth={self.completed_depth} aborted={aborted} "
+            f"prediction={self.predicted_next_s:.3f}s "
+            f"aspiration={int(self.aspiration_used)}/{int(self.aspiration_failed)} "
+            f"reserve_skip={int(self.aspiration_reserve_skip)} root_gap={gap} "
+            f"band={self.band} policy={self.policy} stop={self.stop_reason}"
+        )
+
+
+def is_root_ambiguous(root_gap: int | None, config: TimeConfig) -> bool:
+    if root_gap is None or root_gap > config.root_uncertainty_gap:
+        return False
+    return not config.require_positive_root_gap or root_gap > 0
 
 
 class Bot:
@@ -51,13 +85,17 @@ class Bot:
         tt_exp_size: int = 22,
         collect_stats: bool = False,
         increment_s: float = INCREMENT_S,
+        time_config: TimeConfig = DEFAULT_TIME_CONFIG,
+        trace_timing: bool = False,
     ) -> None:
         self.tt_exp_size = tt_exp_size
         self.collect_stats = collect_stats
         self.increment_s = increment_s
+        self.time_config = time_config
+        self.trace_timing = trace_timing
         self.current_age = 0
         self.tt_arrays = create_tt_arrays(tt_exp_size)
-        self.time_mgr = TimeManager(increment_s=increment_s)
+        self.time_mgr = TimeManager(increment_s=increment_s, config=time_config)
 
         # Pre-allocate reusable search arrays across moves
         self.undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
@@ -75,6 +113,7 @@ class Bot:
         self.runner_up_score = -INF
         self.root_score_gap: int | None = None
         self.search_stats: SearchStats | None = None
+        self.last_timing: MoveTiming | None = None
         self._game_hashes: list[int] = []
         self._pending_position: Board | None = None
 
@@ -126,6 +165,7 @@ class Bot:
             self.best_score = 0
             self.runner_up_score = -INF
             self.root_score_gap = None
+            self._record_timing(0, None, 0.0, False, False, False, None, "no-legal-move")
             return NO_MOVE
 
         if len(legal_moves) == 1:
@@ -136,6 +176,7 @@ class Bot:
             self.runner_up_score = -INF
             self.root_score_gap = None
             self._record_selected_move(board, legal_moves[0])
+            self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
             return legal_moves[0]
 
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
@@ -146,6 +187,7 @@ class Bot:
             self.runner_up_score = -INF
             self.root_score_gap = None
             self._record_selected_move(board, legal_moves[0])
+            self._record_timing(0, None, 0.0, False, False, False, None, "request-deadline")
             return legal_moves[0]
 
         state = board_to_state(board)
@@ -195,51 +237,83 @@ class Bot:
         completed_runner_up_score = -INF
         completed_root_score_gap: int | None = None
         completed_depth = 0
+        aborted_depth: int | None = None
+        last_prediction = 0.0
+        aspiration_used_any = False
+        aspiration_failed_any = False
+        aspiration_reserve_skip = False
+        stop_reason = "max-depth"
         max_d = depth if depth is not None else 64
 
         for d in range(1, max_d + 1):
             if d > 1 and depth is None and self.time_mgr.should_stop_iterating():
+                stop_reason = "soft-limit"
                 break
 
-            if d > 2 and depth is None and self.time_mgr.is_panic_clock():
+            if (
+                d > self.time_config.panic_max_depth
+                and depth is None
+                and self.time_mgr.is_panic_clock()
+            ):
+                stop_reason = "panic-depth"
                 break
 
             predicted_time = 0.0
-            prediction_safety = ITERATION_SAFETY_FACTOR
+            prediction_safety = self.time_config.iteration_safety_factor
             if len(iteration_times) >= 2:
                 previous_time = max(iteration_times[-2], 0.0001)
                 growth = iteration_times[-1] / previous_time
-                minimum_growth = 1.6
-                if root_move_count >= 30 or root_in_check:
-                    minimum_growth = 1.9
-                    prediction_safety = 1.20
+                minimum_growth = self.time_config.normal_min_growth
+                if root_move_count >= self.time_config.busy_root_moves or root_in_check:
+                    minimum_growth = self.time_config.busy_min_growth
+                    prediction_safety = self.time_config.busy_prediction_safety
                 if last_root_ambiguous or last_aspiration_failed:
-                    minimum_growth = max(minimum_growth, 2.1)
-                    prediction_safety = max(prediction_safety, 1.25)
-                predicted_time = iteration_times[-1] * min(max(growth, minimum_growth), 3.0)
+                    minimum_growth = max(
+                        minimum_growth,
+                        self.time_config.uncertain_min_growth,
+                    )
+                    prediction_safety = max(
+                        prediction_safety,
+                        self.time_config.uncertain_prediction_safety,
+                    )
+                predicted_time = iteration_times[-1] * min(
+                    max(growth, minimum_growth),
+                    self.time_config.max_growth,
+                )
+            last_prediction = predicted_time
 
             if (
-                d >= 5
+                d >= self.time_config.prediction_min_depth
                 and depth is None
                 and predicted_time
                 and self.time_mgr.elapsed() + predicted_time * prediction_safety
                 >= self.time_mgr.hard_limit
             ):
+                stop_reason = "prediction"
                 break
 
             iteration_start = self.time_mgr.elapsed()
             aspiration_failed = False
-            use_aspiration = d >= 5 and abs(best_score) < MATE_THRESHOLD
+            use_aspiration = (
+                d >= self.time_config.aspiration_min_depth
+                and abs(best_score) < MATE_THRESHOLD
+            )
             if use_aspiration and (self.time_mgr.is_low_clock() or not predicted_time):
                 use_aspiration = False
             elif use_aspiration:
                 retry_reserve = predicted_time * prediction_safety
-                if self.time_mgr.elapsed() + 2.0 * retry_reserve >= self.time_mgr.hard_limit:
+                if (
+                    self.time_mgr.elapsed()
+                    + self.time_config.aspiration_retry_reserve * retry_reserve
+                    >= self.time_mgr.hard_limit
+                ):
                     use_aspiration = False
+                    aspiration_reserve_skip = True
+            aspiration_used_any = aspiration_used_any or use_aspiration
 
-            # Aspiration window for depth >= 5
+            # Aspiration window for configured depths
             if use_aspiration:
-                delta = 30
+                delta = self.time_config.aspiration_delta
                 alpha = max(-INF, best_score - delta)
                 beta = min(INF, best_score + delta)
                 score, move, runner_up_score, aborted = search_root(
@@ -330,6 +404,8 @@ class Bot:
                 )
 
             if aborted:
+                aborted_depth = d
+                stop_reason = "hard-limit"
                 break
 
             if move != NO_MOVE:
@@ -340,9 +416,7 @@ class Bot:
 
             self.time_mgr.extend_if_unstable(prev_score, score)
             root_score_gap = score - runner_up_score if runner_up_score != -INF else None
-            last_root_ambiguous = (
-                root_score_gap is not None and root_score_gap <= ROOT_UNCERTAINTY_GAP
-            )
+            last_root_ambiguous = is_root_ambiguous(root_score_gap, self.time_config)
             completed_runner_up_score = runner_up_score
             completed_root_score_gap = root_score_gap
             if last_root_ambiguous:
@@ -350,15 +424,15 @@ class Bot:
             if (
                 move == prev_move
                 and prev_score is not None
-                and abs(score - prev_score) <= STABLE_SCORE_DELTA
+                and abs(score - prev_score) <= self.time_config.stable_score_delta
             ):
                 stable_iterations += 1
             else:
                 stable_iterations = 1
 
             if (
-                best_score >= STABLE_WIN_SCORE
-                and stable_iterations >= STABLE_WIN_ITERATIONS
+                best_score >= self.time_config.stable_win_score
+                and stable_iterations >= self.time_config.stable_win_iterations
                 and not last_root_ambiguous
             ):
                 self.time_mgr.shorten_for_stable_win()
@@ -370,6 +444,7 @@ class Bot:
             prev_score = score
             prev_move = move
             last_aspiration_failed = aspiration_failed
+            aspiration_failed_any = aspiration_failed_any or aspiration_failed
 
             nodes = int(self.stats[0])
             elapsed = max(self.time_mgr.elapsed() - start_t, 0.0001)
@@ -403,6 +478,7 @@ class Bot:
                     )
 
             if abs(best_score) > MATE_THRESHOLD:
+                stop_reason = "mate"
                 break
 
         self.best_move = best_move
@@ -413,8 +489,48 @@ class Bot:
         self.sel_depth = completed_depth
         self.nodes = int(self.stats[0])
         self._record_selected_move(board, best_move)
+        self._record_timing(
+            completed_depth,
+            aborted_depth,
+            last_prediction,
+            aspiration_used_any,
+            aspiration_failed_any,
+            aspiration_reserve_skip,
+            completed_root_score_gap,
+            stop_reason,
+        )
 
         return best_move
+
+    def _record_timing(
+        self,
+        completed_depth: int,
+        aborted_depth: int | None,
+        predicted_next_s: float,
+        aspiration_used: bool,
+        aspiration_failed: bool,
+        aspiration_reserve_skip: bool,
+        root_gap: int | None,
+        stop_reason: str,
+    ) -> None:
+        self.last_timing = MoveTiming(
+            clock_before_s=self.time_mgr.clock_left_s,
+            soft_limit_s=self.time_mgr.soft_limit,
+            hard_limit_s=self.time_mgr.hard_limit,
+            elapsed_s=self.time_mgr.elapsed(),
+            completed_depth=completed_depth,
+            aborted_depth=aborted_depth,
+            predicted_next_s=predicted_next_s,
+            aspiration_used=aspiration_used,
+            aspiration_failed=aspiration_failed,
+            aspiration_reserve_skip=aspiration_reserve_skip,
+            root_gap=root_gap,
+            band=self.time_mgr.clock_band,
+            policy=self.time_mgr.policy,
+            stop_reason=stop_reason,
+        )
+        if self.trace_timing:
+            print(self.last_timing.format())
 
     def _record_position(self, board: Board) -> None:
         if self._pending_position is None:

@@ -39,11 +39,26 @@ class EvalStatsTests(unittest.TestCase):
 
         self.assertAlmostEqual(elo, 1320.0 + 5 * 93.5, places=6)
 
-    def test_parallel_evaluation_requires_fixed_skill(self) -> None:
-        evaluator = AdaptiveEvaluator()
+    def test_adaptive_wave_raises_skill_after_more_wins(self) -> None:
+        evaluator = AdaptiveEvaluator(initial_skill=5)
+        results = [
+            self._result(1.0, 5),
+            self._result(1.0, 5),
+            self._result(0.5, 5),
+            self._result(0.0, 5),
+        ]
 
-        with self.assertRaisesRegex(ValueError, "fixed Stockfish skill"):
-            evaluator.run_benchmark(workers=2)
+        evaluator._update_skill(results)
+
+        self.assertEqual(evaluator.current_skill, 6)
+
+    def test_adaptive_wave_keeps_skill_when_decisive_results_balance(self) -> None:
+        evaluator = AdaptiveEvaluator(initial_skill=5)
+        results = [self._result(1.0, 5), self._result(0.0, 5)]
+
+        evaluator._update_skill(results)
+
+        self.assertEqual(evaluator.current_skill, 5)
 
 
 if __name__ == "__main__":

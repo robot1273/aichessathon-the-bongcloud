@@ -32,4 +32,4 @@ profile:
 	uv run python -m src.scripts.profile_funcs $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(TOP),--top "$(TOP)") $(if $(SORT),--sort "$(SORT)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)
 
 eval:
-	uv run python -m src.scripts.eval $(if $(GAMES),--games "$(GAMES)") $(if $(BASE_MS),--base-time "$(BASE_MS)") $(if $(INC_MS),--inc "$(INC_MS)") $(if $(SKILL),--skill "$(SKILL)") $(if $(STATIC),--static-skill) $(if $(WORKERS),--workers "$(WORKERS)")
+	uv run python -m src.scripts.eval $(if $(GAMES),--games "$(GAMES)") $(if $(BASE_MS),--base-time "$(BASE_MS)") $(if $(INC_MS),--inc "$(INC_MS)") $(if $(SKILL),--skill "$(SKILL)") $(if $(STATIC),--static-skill) $(if $(WORKERS),--workers "$(WORKERS)") $(if $(TRACE_TIMING),--trace-timing) $(if $(POSITIVE_ROOT_GAP),--positive-root-gap) $(if $(ASPIRATION_RESERVE),--aspiration-reserve "$(ASPIRATION_RESERVE)")

@@ -2,13 +2,14 @@ import argparse
 import math
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import chess
 import chess.engine
 
 from src.board import Board, move_to_uci
 from src.search import Bot
+from src.time_manager import DEFAULT_TIME_CONFIG
 
 
 @dataclass
@@ -99,12 +100,18 @@ class AdaptiveEvaluator:
         base_time_ms: int = 2000,
         inc_ms: int = 50,
         tolerance_buffer_ms: int = 150,  # Max allowed engine latency over clock limit
+        trace_timing: bool = False,
+        require_positive_root_gap: bool = False,
+        aspiration_retry_reserve: float = 2.0,
     ) -> None:
         self.stockfish_path = stockfish_path
         self.current_skill = max(0, min(20, initial_skill))
         self.base_time_ms = base_time_ms
         self.inc_ms = inc_ms
         self.tolerance_buffer_ms = tolerance_buffer_ms
+        self.trace_timing = trace_timing
+        self.require_positive_root_gap = require_positive_root_gap
+        self.aspiration_retry_reserve = aspiration_retry_reserve
 
     def run_benchmark(
         self,
@@ -114,8 +121,6 @@ class AdaptiveEvaluator:
     ) -> EvalStats:
         if workers < 1:
             raise ValueError("workers must be positive")
-        if workers > 1 and adapt_skill:
-            raise ValueError("parallel evaluation requires a fixed Stockfish skill")
 
         stats = EvalStats()
 
@@ -127,17 +132,26 @@ class AdaptiveEvaluator:
         print("=" * 65)
 
         if workers > 1:
-            game_ids = range(1, total_games + 1)
-            colors = [chess.WHITE if game_id % 2 != 0 else chess.BLACK for game_id in game_ids]
+            next_game_id = 1
             with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = [
-                    executor.submit(self._play_game, game_id, bot_color)
-                    for game_id, bot_color in zip(game_ids, colors, strict=True)
-                ]
-                for future in futures:
-                    res = future.result()
-                    stats.add_result(res)
-                    self._print_game_result(total_games, res)
+                while next_game_id <= total_games:
+                    wave_end = min(next_game_id + workers, total_games + 1)
+                    game_ids = range(next_game_id, wave_end)
+                    futures = [
+                        executor.submit(
+                            self._play_game,
+                            game_id,
+                            chess.WHITE if game_id % 2 != 0 else chess.BLACK,
+                        )
+                        for game_id in game_ids
+                    ]
+                    wave_results = [future.result() for future in futures]
+                    for res in wave_results:
+                        stats.add_result(res)
+                        self._print_game_result(total_games, res)
+                    if adapt_skill:
+                        self._update_skill(wave_results)
+                    next_game_id = wave_end
             self._print_summary(stats)
             return stats
 
@@ -147,17 +161,24 @@ class AdaptiveEvaluator:
             res = self._play_game(game_idx, bot_color)
             stats.add_result(res)
 
-            # Adapt Stockfish Skill level dynamically using a win/loss step scheme
             if adapt_skill:
-                if res.bot_score == 1.0 and self.current_skill < 20:
-                    self.current_skill += 1
-                elif res.bot_score == 0.0 and self.current_skill > 0:
-                    self.current_skill -= 1
+                self._update_skill([res])
 
             self._print_game_result(total_games, res)
 
         self._print_summary(stats)
         return stats
+
+    def _update_skill(self, results: list[GameResult]) -> None:
+        """Adjust once per completed wave from its decisive-game balance."""
+        decisive_balance = sum(
+            1 if result.bot_score == 1.0 else -1 if result.bot_score == 0.0 else 0
+            for result in results
+        )
+        if decisive_balance > 0:
+            self.current_skill = min(self.current_skill + 1, 20)
+        elif decisive_balance < 0:
+            self.current_skill = max(self.current_skill - 1, 0)
 
     @staticmethod
     def _print_game_result(total_games: int, res: GameResult) -> None:
@@ -173,7 +194,16 @@ class AdaptiveEvaluator:
 
     def _play_game(self, game_id: int, bot_color: chess.Color) -> GameResult:
         board = chess.Board()
-        bot = Bot(increment_s=self.inc_ms / 1000)
+        time_config = replace(
+            DEFAULT_TIME_CONFIG,
+            require_positive_root_gap=self.require_positive_root_gap,
+            aspiration_retry_reserve=self.aspiration_retry_reserve,
+        )
+        bot = Bot(
+            increment_s=self.inc_ms / 1000,
+            time_config=time_config,
+            trace_timing=self.trace_timing,
+        )
 
         bot_clock = float(self.base_time_ms)
         sf_clock = float(self.base_time_ms)
@@ -388,18 +418,34 @@ def main() -> None:
     parser.add_argument(
         "--static-skill", action="store_true", help="Disable adaptive skill adjustments"
     )
+    parser.add_argument(
+        "--trace-timing",
+        action="store_true",
+        help="Print one timing report for each bot move",
+    )
+    parser.add_argument(
+        "--positive-root-gap",
+        action="store_true",
+        help="Ignore zero root gaps produced by PVS bounds",
+    )
+    parser.add_argument(
+        "--aspiration-reserve",
+        type=float,
+        default=2.0,
+        help="Predicted-iteration multiples reserved before aspiration",
+    )
 
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be positive")
-    if args.workers > 1 and not args.static_skill:
-        parser.error("--workers requires --static-skill")
-
     evaluator = AdaptiveEvaluator(
         stockfish_path=args.stockfish,
         initial_skill=args.skill,
         base_time_ms=args.base_time,
         inc_ms=args.inc,
+        trace_timing=args.trace_timing,
+        require_positive_root_gap=args.positive_root_gap,
+        aspiration_retry_reserve=args.aspiration_reserve,
     )
 
     evaluator.run_benchmark(
