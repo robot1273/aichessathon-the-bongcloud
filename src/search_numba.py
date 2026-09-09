@@ -681,15 +681,15 @@ def search_root(
     tt_bound: np.ndarray,
     tt_age: np.ndarray,
     tt_static_eval: np.ndarray,
-) -> tuple[int, int, bool]:
+) -> tuple[int, int, int, bool]:
     stats[0] += 1
     if (stats[0] & 1023) == 0:
         if stats[3] > 0 and clock() >= stats[3]:
             stats[1] = 1
-            return 0, NO_MOVE, True
+            return 0, NO_MOVE, -INF, True
 
     if stats[1] == 1:
-        return 0, NO_MOVE, True
+        return 0, NO_MOVE, -INF, True
 
     hash_val = state[HASH]
     found, tt_move_val, _, _, _, tt_static_val = probe_tt(
@@ -705,6 +705,7 @@ def search_root(
 
     best_move = NO_MOVE
     best_score = -INF
+    runner_up_score = -INF
     alpha_orig = alpha
     legal_moves = 0
     us = int(state[TURN])
@@ -841,43 +842,46 @@ def search_root(
         unmake_move(state, undo_stack, 0)
 
         if stats[1] == 1:
-            return best_score if best_score != -INF else 0, best_move, True
+            return best_score if best_score != -INF else 0, best_move, runner_up_score, True
 
         if score > best_score:
+            runner_up_score = best_score
             best_score = score
             best_move = move
+        elif score > runner_up_score:
+            runner_up_score = score
 
-            if score > alpha:
-                alpha = score
+        if score > alpha:
+            alpha = score
 
-                if score >= beta:
-                    if not is_tactical:
-                        if killers[0, 0] != move:
-                            killers[0, 1] = killers[0, 0]
-                            killers[0, 0] = move
-                        history[us, from_sq, to_sq] += depth * depth
+            if score >= beta:
+                if not is_tactical:
+                    if killers[0, 0] != move:
+                        killers[0, 1] = killers[0, 0]
+                        killers[0, 0] = move
+                    history[us, from_sq, to_sq] += depth * depth
 
-                    store_tt(
-                        hash_val,
-                        best_move,
-                        score_to_tt(score, 0),
-                        depth,
-                        BOUND_LOWER,
-                        static_eval,
-                        age,
-                        tt_hash,
-                        tt_score,
-                        tt_move,
-                        tt_depth,
-                        tt_bound,
-                        tt_age,
-                        tt_static_eval,
-                    )
-                    return beta, best_move, False
+                store_tt(
+                    hash_val,
+                    best_move,
+                    score_to_tt(score, 0),
+                    depth,
+                    BOUND_LOWER,
+                    static_eval,
+                    age,
+                    tt_hash,
+                    tt_score,
+                    tt_move,
+                    tt_depth,
+                    tt_bound,
+                    tt_age,
+                    tt_static_eval,
+                )
+                return beta, best_move, runner_up_score, False
 
     if legal_moves == 0:
         mate_val = -MATE_SCORE if in_check else 0
-        return mate_val, NO_MOVE, False
+        return mate_val, NO_MOVE, -INF, False
 
     bound = BOUND_EXACT if best_score > alpha_orig else BOUND_UPPER
     store_tt(
@@ -897,7 +901,7 @@ def search_root(
         tt_static_eval,
     )
 
-    return best_score, best_move, False
+    return best_score, best_move, runner_up_score, False
 
 
 @njit(cache=False)
@@ -936,7 +940,7 @@ def iterative_deepening(
         stats[3] = 0
 
     for depth in range(1, max_depth + 1):
-        score, move, aborted = search_root(
+        score, move, _, aborted = search_root(
             state,
             undo_stack,
             moves_stack,

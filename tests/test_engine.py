@@ -6,7 +6,7 @@ import numpy as np
 
 from src import board_primitives
 from src.board import Board, move_to_uci
-from src.constants import MAX_PLY, STATE_SIZE
+from src.constants import INF, MAX_PLY, STATE_SIZE
 from src.evaluation import evaluate_with_phase
 from src.search import Bot
 from src.search_numba import board_to_state, is_draw
@@ -41,6 +41,15 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(
                 is_draw(state, undo_stack, ply + 1, history, len(history)), expected_draw
             )
+
+    def test_completed_search_reports_root_score_gap(self) -> None:
+        bot = Bot()
+        board = Board.from_fen()
+
+        bot.get_best_move(board, time_left_ms=100_000, depth=2)
+
+        self.assertGreater(bot.runner_up_score, -INF)
+        self.assertEqual(bot.root_score_gap, bot.best_score - bot.runner_up_score)
 
 
 class EvaluationTests(unittest.TestCase):

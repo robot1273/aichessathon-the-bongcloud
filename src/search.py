@@ -42,6 +42,7 @@ STABLE_WIN_SCORE = 600
 STABLE_SCORE_DELTA = 35
 STABLE_WIN_ITERATIONS = 3
 ITERATION_SAFETY_FACTOR = 1.10
+ROOT_UNCERTAINTY_GAP = 50
 
 
 class Bot:
@@ -71,6 +72,8 @@ class Bot:
         self.best_score = 0
         self.nodes = 0
         self.best_move = NO_MOVE
+        self.runner_up_score = -INF
+        self.root_score_gap: int | None = None
         self.search_stats: SearchStats | None = None
         self._game_hashes: list[int] = []
         self._pending_position: Board | None = None
@@ -121,6 +124,8 @@ class Bot:
             self.nodes = 0
             self.completed_depth = 0
             self.best_score = 0
+            self.runner_up_score = -INF
+            self.root_score_gap = None
             return NO_MOVE
 
         if len(legal_moves) == 1:
@@ -128,6 +133,8 @@ class Bot:
             self.nodes = 1
             self.completed_depth = 1
             self.best_score = 0
+            self.runner_up_score = -INF
+            self.root_score_gap = None
             self._record_selected_move(board, legal_moves[0])
             return legal_moves[0]
 
@@ -136,6 +143,8 @@ class Bot:
             self.nodes = 0
             self.completed_depth = 0
             self.best_score = 0
+            self.runner_up_score = -INF
+            self.root_score_gap = None
             self._record_selected_move(board, legal_moves[0])
             return legal_moves[0]
 
@@ -177,6 +186,14 @@ class Bot:
         prev_move = NO_MOVE
         stable_iterations = 0
         iteration_times: list[float] = []
+        root_move_count = len(legal_moves)
+        root_in_check = board.is_in_check()
+        last_root_ambiguous = False
+        last_aspiration_failed = False
+        runner_up_score = -INF
+        root_score_gap: int | None = None
+        completed_runner_up_score = -INF
+        completed_root_score_gap: int | None = None
         completed_depth = 0
         max_d = depth if depth is not None else 64
 
@@ -184,24 +201,48 @@ class Bot:
             if d > 1 and depth is None and self.time_mgr.should_stop_iterating():
                 break
 
-            if d >= 5 and depth is None and len(iteration_times) >= 2:
+            if d > 2 and depth is None and self.time_mgr.is_panic_clock():
+                break
+
+            predicted_time = 0.0
+            prediction_safety = ITERATION_SAFETY_FACTOR
+            if len(iteration_times) >= 2:
                 previous_time = max(iteration_times[-2], 0.0001)
                 growth = iteration_times[-1] / previous_time
-                predicted_time = iteration_times[-1] * min(max(growth, 1.6), 3.0)
-                if (
-                    self.time_mgr.elapsed() + predicted_time * ITERATION_SAFETY_FACTOR
-                    >= self.time_mgr.hard_limit
-                ):
-                    break
+                minimum_growth = 1.6
+                if root_move_count >= 30 or root_in_check:
+                    minimum_growth = 1.9
+                    prediction_safety = 1.20
+                if last_root_ambiguous or last_aspiration_failed:
+                    minimum_growth = max(minimum_growth, 2.1)
+                    prediction_safety = max(prediction_safety, 1.25)
+                predicted_time = iteration_times[-1] * min(max(growth, minimum_growth), 3.0)
+
+            if (
+                d >= 5
+                and depth is None
+                and predicted_time
+                and self.time_mgr.elapsed() + predicted_time * prediction_safety
+                >= self.time_mgr.hard_limit
+            ):
+                break
 
             iteration_start = self.time_mgr.elapsed()
+            aspiration_failed = False
+            use_aspiration = d >= 5 and abs(best_score) < MATE_THRESHOLD
+            if use_aspiration and (self.time_mgr.is_low_clock() or not predicted_time):
+                use_aspiration = False
+            elif use_aspiration:
+                retry_reserve = predicted_time * prediction_safety
+                if self.time_mgr.elapsed() + 2.0 * retry_reserve >= self.time_mgr.hard_limit:
+                    use_aspiration = False
 
             # Aspiration window for depth >= 5
-            if d >= 5 and abs(best_score) < MATE_THRESHOLD:
+            if use_aspiration:
                 delta = 30
                 alpha = max(-INF, best_score - delta)
                 beta = min(INF, best_score + delta)
-                score, move, aborted = search_root(
+                score, move, runner_up_score, aborted = search_root(
                     state,
                     self.undo_stack,
                     self.moves_stack,
@@ -220,14 +261,15 @@ class Bot:
 
                 if not aborted and score <= alpha:
                     # Fail low: widen window to -INF
+                    aspiration_failed = True
                     retry_time = self.time_mgr.elapsed() - iteration_start
                     if (
-                        self.time_mgr.elapsed() + retry_time * ITERATION_SAFETY_FACTOR
+                        self.time_mgr.elapsed() + retry_time * prediction_safety
                         >= self.time_mgr.hard_limit
                     ):
                         aborted = True
                     else:
-                        score, move, aborted = search_root(
+                        score, move, runner_up_score, aborted = search_root(
                             state,
                             self.undo_stack,
                             self.moves_stack,
@@ -245,14 +287,15 @@ class Bot:
                         )
                 elif not aborted and score >= beta:
                     # Fail high: widen window to INF
+                    aspiration_failed = True
                     retry_time = self.time_mgr.elapsed() - iteration_start
                     if (
-                        self.time_mgr.elapsed() + retry_time * ITERATION_SAFETY_FACTOR
+                        self.time_mgr.elapsed() + retry_time * prediction_safety
                         >= self.time_mgr.hard_limit
                     ):
                         aborted = True
                     else:
-                        score, move, aborted = search_root(
+                        score, move, runner_up_score, aborted = search_root(
                             state,
                             self.undo_stack,
                             self.moves_stack,
@@ -269,7 +312,7 @@ class Bot:
                             *self.tt_arrays,
                         )
             else:
-                score, move, aborted = search_root(
+                score, move, runner_up_score, aborted = search_root(
                     state,
                     self.undo_stack,
                     self.moves_stack,
@@ -296,6 +339,14 @@ class Bot:
             iteration_times.append(self.time_mgr.elapsed() - iteration_start)
 
             self.time_mgr.extend_if_unstable(prev_score, score)
+            root_score_gap = score - runner_up_score if runner_up_score != -INF else None
+            last_root_ambiguous = (
+                root_score_gap is not None and root_score_gap <= ROOT_UNCERTAINTY_GAP
+            )
+            completed_runner_up_score = runner_up_score
+            completed_root_score_gap = root_score_gap
+            if last_root_ambiguous:
+                self.time_mgr.extend_for_root_uncertainty()
             if (
                 move == prev_move
                 and prev_score is not None
@@ -305,7 +356,11 @@ class Bot:
             else:
                 stable_iterations = 1
 
-            if best_score >= STABLE_WIN_SCORE and stable_iterations >= STABLE_WIN_ITERATIONS:
+            if (
+                best_score >= STABLE_WIN_SCORE
+                and stable_iterations >= STABLE_WIN_ITERATIONS
+                and not last_root_ambiguous
+            ):
                 self.time_mgr.shorten_for_stable_win()
 
             if depth is None or movetime_ms is not None:
@@ -314,6 +369,7 @@ class Bot:
                 )
             prev_score = score
             prev_move = move
+            last_aspiration_failed = aspiration_failed
 
             nodes = int(self.stats[0])
             elapsed = max(self.time_mgr.elapsed() - start_t, 0.0001)
@@ -336,6 +392,7 @@ class Bot:
                     "time": elapsed,
                     "time_ms": int(elapsed * 1000),
                     "pv": best_move,
+                    "root_score_gap": root_score_gap,
                 }
                 if callback:
                     callback(info)
@@ -350,6 +407,8 @@ class Bot:
 
         self.best_move = best_move
         self.best_score = best_score
+        self.runner_up_score = completed_runner_up_score
+        self.root_score_gap = completed_root_score_gap
         self.completed_depth = completed_depth
         self.sel_depth = completed_depth
         self.nodes = int(self.stats[0])

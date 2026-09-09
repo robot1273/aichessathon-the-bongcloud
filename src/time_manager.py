@@ -8,6 +8,8 @@ class TimeManager:
     """Decide how long to think on a single move."""
 
     SAFETY_S: float = 1.0
+    LOW_CLOCK_INCREMENTS: float = 20.0
+    PANIC_CLOCK_INCREMENTS: float = 6.0
 
     def __init__(self, increment_s: float) -> None:
         self._start: float = 0.0
@@ -17,6 +19,7 @@ class TimeManager:
         self._base_hard_limit: float = 0.0
         self._is_fixed_time: bool = False
         self._usable: float = 0.0
+        self._clock_left_s: float = 0.0
         self._increment_s: float = increment_s
 
     def start(
@@ -28,6 +31,7 @@ class TimeManager:
     ) -> None:
         """Begin the clock for one move."""
         self._start = time.monotonic() if started_at is None else started_at
+        self._clock_left_s = max(time_left_ms / 1000.0, 0.0)
 
         if movetime_ms is not None:
             self._is_fixed_time = True
@@ -55,6 +59,9 @@ class TimeManager:
 
         self._soft_limit = min(base, usable * 0.20)
         self._hard_limit = min(base * 3.0, usable * 0.40)
+        if self.is_panic_clock():
+            self._soft_limit = min(self._soft_limit, max(self._increment_s * 0.65, 0.010))
+            self._hard_limit = min(self._hard_limit, max(self._increment_s * 0.95, 0.020))
         self._base_soft_limit = self._soft_limit
         self._base_hard_limit = self._hard_limit
 
@@ -71,6 +78,19 @@ class TimeManager:
             factor = min(1.0 + swing / 300.0, 1.6)
             self._soft_limit = min(self._base_soft_limit * factor, self._usable * 0.45)
             self._hard_limit = min(self._base_hard_limit * factor, self._usable * 0.65)
+
+    def extend_for_root_uncertainty(self) -> None:
+        """Reserve more time when multiple root moves remain competitive."""
+        if self._is_fixed_time or self.is_low_clock():
+            return
+        self._soft_limit = max(
+            self._soft_limit,
+            min(self._base_soft_limit * 1.20, self._usable * 0.45),
+        )
+        self._hard_limit = max(
+            self._hard_limit,
+            min(self._base_hard_limit * 1.25, self._usable * 0.65),
+        )
 
     def shorten_for_stable_win(self) -> None:
         """Stop earlier when several completed iterations confirm a clear win."""
@@ -94,10 +114,29 @@ class TimeManager:
     def should_stop_iterating(self) -> bool:
         return self.elapsed() >= self._soft_limit
 
+    def is_low_clock(self) -> bool:
+        return not self._is_fixed_time and self._clock_left_s <= self._low_clock_threshold()
+
+    def is_panic_clock(self) -> bool:
+        return not self._is_fixed_time and self._clock_left_s <= self._panic_clock_threshold()
+
+    def _low_clock_threshold(self) -> float:
+        return max(self._increment_s * self.LOW_CLOCK_INCREMENTS, 1.0)
+
+    def _panic_clock_threshold(self) -> float:
+        return max(self._increment_s * self.PANIC_CLOCK_INCREMENTS, 0.25)
+
     def _base_time(self, usable: float, move_number: int, phase: float) -> float:
         # Material alone is a poor proxy for remaining moves: many won rook and
         # pawn endings still need dozens of accurate conversion moves.
         expected_remaining = 28.0 + 17.0 * phase
+        # When low on time, budget for more future moves so the increment can
+        # rebuild the clock instead of repeatedly spending the remaining base.
+        pressure_threshold = self._low_clock_threshold()
+        if self._clock_left_s < pressure_threshold:
+            expected_remaining += (
+                12.0 * (pressure_threshold - self._clock_left_s) / pressure_threshold
+            )
         base = (usable / expected_remaining) + (self._increment_s * 0.8)
         if 5 <= move_number <= 25:
             base *= 1.20

@@ -46,6 +46,44 @@ class TimeManagerTests(unittest.TestCase):
         self.assertAlmostEqual(manager.soft_limit, soft_limit * 0.80)
         self.assertEqual(manager.hard_limit, hard_limit)
 
+    def test_root_uncertainty_extends_the_base_budget(self) -> None:
+        manager = TimeManager(increment_s=0.5)
+        manager.start(120_000, self.board)
+        soft_limit = manager.soft_limit
+        hard_limit = manager.hard_limit
+
+        manager.extend_for_root_uncertainty()
+
+        self.assertAlmostEqual(manager.soft_limit, soft_limit * 1.20)
+        self.assertAlmostEqual(manager.hard_limit, hard_limit * 1.25)
+
+    def test_low_clock_disables_uncertainty_extension(self) -> None:
+        manager = TimeManager(increment_s=0.5)
+        manager.start(10_000, self.board)
+        soft_limit = manager.soft_limit
+        hard_limit = manager.hard_limit
+
+        manager.extend_for_root_uncertainty()
+
+        self.assertTrue(manager.is_low_clock())
+        self.assertEqual(manager.soft_limit, soft_limit)
+        self.assertEqual(manager.hard_limit, hard_limit)
+
+    def test_low_clock_threshold_scales_with_increment(self) -> None:
+        manager = TimeManager(increment_s=0.05)
+        manager.start(2_000, self.board)
+
+        self.assertFalse(manager.is_low_clock())
+        self.assertFalse(manager.is_panic_clock())
+
+    def test_panic_clock_caps_search_budget_below_increment(self) -> None:
+        manager = TimeManager(increment_s=0.5)
+        manager.start(3_000, self.board)
+
+        self.assertTrue(manager.is_panic_clock())
+        self.assertLessEqual(manager.soft_limit, 0.325)
+        self.assertLessEqual(manager.hard_limit, 0.475)
+
     def test_opening_positions_receive_extra_budget(self) -> None:
         first_move = Board.from_fen()
         later_move = Board.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 20")
