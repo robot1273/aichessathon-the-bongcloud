@@ -307,11 +307,11 @@ class AdaptiveEvaluator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adaptive Stockfish Evaluator with Time Stress Testing.")
     parser.add_argument("--stockfish-path", type=str, default="stockfish", help="Path to Stockfish binary.")
-    parser.add_argument("--games", type=int, default=25, help="Number of games to run.")
-    parser.add_argument("--skill", type=int, default=3, help="Starting Stockfish Skill Level (0-20).")
+    parser.add_argument("--games", type=int, default=15, help="Number of games to run.")
+    parser.add_argument("--skill", type=int, default=4, help="Starting Stockfish Skill Level (0-20).")
 
     # Stress-test presets
-    parser.add_argument("--stress_test", choices=["bullet", "sudden_death", "std"], default="std", help="Time stress test mode")
+    parser.add_argument("--stress_test", choices=["bullet", "sudden_death", "std"], default="bullet", help="Time stress test mode")
 
     args = parser.parse_args()
 
@@ -329,4 +329,4 @@ if __name__ == "__main__":
         base_time_ms=base_ms,
         inc_ms=inc_ms,
     )
-    evaluator.run_benchmark(total_games=args.games, adapt_skill=True)
+    evaluator.run_benchmark(total_games=args.games, adapt_skill=False)

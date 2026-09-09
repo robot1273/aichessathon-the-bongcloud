@@ -213,8 +213,6 @@ class Bot:
 
             if abs(best_score) > MATE_THRESHOLD:
                 break
-            if depth is not None and current_depth >= depth:
-                break
             if self.time_mgr.should_stop_iterating():
                 break
 
