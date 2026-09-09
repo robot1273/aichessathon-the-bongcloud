@@ -76,8 +76,8 @@ FULLMOVE: Final[int] = 12
 HASH: Final[int] = 13  # Zobrist hash
 
 MG_SCORE_W: Final[int] = 14
-EG_SCORE_W: Final[int] = 15
-MG_SCORE_B: Final[int] = 16
+MG_SCORE_B: Final[int] = 15
+EG_SCORE_W: Final[int] = 16
 EG_SCORE_B: Final[int] = 17
 
 GAME_PHASE: Final[int] = 18
@@ -87,8 +87,8 @@ BISHOP_COUNT_W: Final[int] = 19
 BISHOP_COUNT_B: Final[int] = 20
 
 MG_BONUS_W: Final[int] = 21
-EG_BONUS_W: Final[int] = 22
-MG_BONUS_B: Final[int] = 23
+MG_BONUS_B: Final[int] = 22
+EG_BONUS_W: Final[int] = 23
 EG_BONUS_B: Final[int] = 24
 
 STATE_SIZE: Final[int] = 25

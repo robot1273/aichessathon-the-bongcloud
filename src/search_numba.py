@@ -13,12 +13,12 @@ import numpy as np
 from numba import njit
 
 from src.board_primitives import (
-    _bit_length,
     evaluate,
     generate_moves,
     gives_check,
     is_in_check,
     is_sq_attacked,
+    lsb_sq,
     make_move,
     make_null_move,
     piece_type_at,
@@ -68,6 +68,7 @@ from src.constants import (
     TURN,
     WHITE,
 )
+from src.move_ordering import MVV_LVA, PIECE_VALUES
 from src.tt import (
     BOUND_EXACT,
     BOUND_LOWER,
@@ -79,18 +80,13 @@ from src.tt import (
     store_tt,
 )
 
-# libc clock for microsecond timing inside Numba without Python GIL
 libc = ctypes.CDLL(None)
 clock = libc.clock
-clock.restype = ctypes.c_long
+clock.restype = ctypes.c_int64
 clock.argtypes = []
 
-# Precomputed Piece values and MVV-LVA scoring matrix
-_PIECE_VALUES = np.array([100, 320, 330, 500, 900, 20000], dtype=np.int32)
-_MVV_LVA = np.zeros((6, 6), dtype=np.int32)
-for _v in range(6):
-    for _a in range(6):
-        _MVV_LVA[_v, _a] = _PIECE_VALUES[_v] * 10 - _PIECE_VALUES[_a]
+_PIECE_VALUES = np.array(PIECE_VALUES, dtype=np.int32)
+_MVV_LVA = np.array(MVV_LVA, dtype=np.int32)
 
 
 @njit(cache=False)
@@ -140,7 +136,7 @@ def score_move(
     killers: np.ndarray,
     history: np.ndarray,
 ) -> int:
-    if move == tt_move:
+    if tt_move != NO_MOVE and move == tt_move:
         return 2000000000
 
     from_sq = move & 0x3F
@@ -168,33 +164,23 @@ def score_move(
 
 
 @njit(cache=False)
-def sort_moves(
-    state: np.ndarray,
-    moves: np.ndarray,
-    num_moves: int,
-    tt_move: int,
-    ply: int,
-    killers: np.ndarray,
-    history: np.ndarray,
-    scores: np.ndarray,
+def pick_move(
+    moves: np.ndarray, scores: np.ndarray, num_moves: int, current_index: int
 ) -> None:
-    for i in range(num_moves):
-        scores[i] = score_move(state, moves[i], tt_move, ply, killers, history)
-
-    for i in range(num_moves - 1):
-        max_idx = i
-        max_score = scores[i]
-        for j in range(i + 1, num_moves):
-            if scores[j] > max_score:
-                max_score = scores[j]
-                max_idx = j
-        if max_idx != i:
-            moves[i], moves[max_idx] = moves[max_idx], moves[i]
-            scores[i], scores[max_idx] = scores[max_idx], scores[i]
+    """Lazy Selection / Pick-Next-Best: select highest scoring move and swap into current_index."""
+    max_idx = current_index
+    max_score = scores[current_index]
+    for j in range(current_index + 1, num_moves):
+        if scores[j] > max_score:
+            max_score = scores[j]
+            max_idx = j
+    if max_idx != current_index:
+        moves[current_index], moves[max_idx] = moves[max_idx], moves[current_index]
+        scores[current_index], scores[max_idx] = scores[max_idx], scores[current_index]
 
 
 @njit(cache=False)
-def sort_captures(
+def score_captures(
     state: np.ndarray,
     moves: np.ndarray,
     num_moves: int,
@@ -217,17 +203,6 @@ def sort_captures(
             scores[i] = 900000000 + flags
         else:
             scores[i] = 0
-
-    for i in range(num_moves - 1):
-        max_idx = i
-        max_score = scores[i]
-        for j in range(i + 1, num_moves):
-            if scores[j] > max_score:
-                max_score = scores[j]
-                max_idx = j
-        if max_idx != i:
-            moves[i], moves[max_idx] = moves[max_idx], moves[i]
-            scores[i], scores[max_idx] = scores[max_idx], scores[i]
 
 
 @njit(cache=False)
@@ -265,12 +240,14 @@ def quiescence(
 
     moves = moves_stack[ply]
     num_moves = generate_moves(state, moves, captures_only=not in_check)
-    sort_captures(state, moves, num_moves, scores_stack[ply])
+    scores = scores_stack[ply]
+    score_captures(state, moves, num_moves, scores)
 
     best_score = -INF if in_check else stand_pat
     legal_moves = 0
 
     for i in range(num_moves):
+        pick_move(moves, scores, num_moves, i)
         move = moves[i]
         flags = (move >> 12) & 0xF
         to_sq = (move >> 6) & 0x3F
@@ -283,13 +260,6 @@ def quiescence(
                 continue
 
         make_move(state, undo_stack, ply, move)
-        us = 1 - int(state[TURN])
-        king_bb = state[P_KING] & state[C_WHITE + us]
-        king_sq = _bit_length(king_bb) - 1
-        if is_sq_attacked(state, king_sq, 1 - us):
-            unmake_move(state, undo_stack, ply)
-            continue
-
         legal_moves += 1
         score = -quiescence(
             state, undo_stack, moves_stack, scores_stack, -beta, -alpha, ply + 1, stats
@@ -336,6 +306,7 @@ def alpha_beta(
     tt_bound: np.ndarray,
     tt_age: np.ndarray,
     tt_static_eval: np.ndarray,
+    extensions: int = 0,
 ) -> int:
     stats[0] += 1
     if (stats[0] & 1023) == 0:
@@ -346,25 +317,22 @@ def alpha_beta(
     if stats[1] == 1:
         return 0
 
+    # Draw checks
     if ply > 0 and is_draw(state, undo_stack, ply, hash_history, hist_len):
         return 0
 
     if ply >= MAX_PLY - 1:
         return evaluate(state)
 
-    # Mate distance pruning
-    alpha = max(alpha, -MATE_SCORE + ply)
-    beta = min(beta, MATE_SCORE - ply - 1)
-    if alpha >= beta:
-        return alpha
-
     is_pv = beta - alpha > 1
     hash_val = state[HASH]
+
+    # Transposition Table probe
     found, tt_move_val, tt_score_val, tt_depth_val, tt_bound_val, tt_static_val = probe_tt(
         hash_val, tt_hash, tt_score, tt_move, tt_depth, tt_bound, tt_age, tt_static_eval
     )
 
-    if found and tt_depth_val >= depth and ply > 0 and not is_pv:
+    if found and not is_pv and tt_depth_val >= depth:
         adjusted_score = score_from_tt(tt_score_val, ply)
         if tt_bound_val == BOUND_EXACT:
             return adjusted_score
@@ -374,8 +342,9 @@ def alpha_beta(
             return alpha
 
     in_check = is_in_check(state)
-    if in_check and ply < MAX_PLY - 2:
+    if in_check and ply < MAX_PLY - 2 and extensions < 4:
         depth += 1
+        extensions += 1
 
     if depth <= 0:
         return int(
@@ -434,6 +403,7 @@ def alpha_beta(
             tt_bound,
             tt_age,
             tt_static_eval,
+            extensions,
         )
         unmake_null_move(state, undo_stack, ply)
 
@@ -445,7 +415,9 @@ def alpha_beta(
 
     moves = moves_stack[ply]
     num_moves = generate_moves(state, moves, captures_only=False)
-    sort_moves(state, moves, num_moves, tt_move_val, ply, killers, history, scores_stack[ply])
+    scores = scores_stack[ply]
+    for i in range(num_moves):
+        scores[i] = score_move(state, moves[i], tt_move_val, ply, killers, history)
 
     best_move = NO_MOVE
     best_score = -INF
@@ -453,6 +425,7 @@ def alpha_beta(
     legal_moves = 0
 
     for i in range(num_moves):
+        pick_move(moves, scores, num_moves, i)
         move = moves[i]
         from_sq = move & 0x3F
         to_sq = (move >> 6) & 0x3F
@@ -462,27 +435,19 @@ def alpha_beta(
             piece_type_at(state, to_sq) != -1 or flags == EN_PASSANT or flags >= KNIGHT_PROMO
         )
 
-        # Futility Pruning
+        # Futility Pruning: verify arithmetic margin before expensive raycast
         if (
             not is_pv
             and not in_check
             and depth <= 3
             and legal_moves > 0
             and not is_tactical
+            and (static_eval + 120 * depth <= alpha)
             and not gives_check(state, move)
         ):
-            if static_eval + 120 * depth <= alpha:
-                continue
-
-        make_move(state, undo_stack, ply, move)
-        moved_side = 1 - int(state[TURN])
-        king_bb = state[P_KING] & state[C_WHITE + moved_side]
-        king_sq = _bit_length(king_bb) - 1
-
-        if is_sq_attacked(state, king_sq, 1 - moved_side):
-            unmake_move(state, undo_stack, ply)
             continue
 
+        make_move(state, undo_stack, ply, move)
         legal_moves += 1
 
         if legal_moves == 1:
@@ -509,15 +474,27 @@ def alpha_beta(
                 tt_bound,
                 tt_age,
                 tt_static_eval,
+                extensions,
             )
         else:
-            # Late Move Reductions (LMR)
+            # Modernized Late Move Reductions (LMR)
             reduction = 0
             if depth >= 3 and legal_moves >= 4 and not is_tactical and not in_check:
                 reduction = 1
-                if not is_pv and legal_moves >= 6:
+                if legal_moves >= 6:
                     reduction += 1
-                reduction = min(reduction, depth - 2)
+                if depth >= 6 and legal_moves >= 12:
+                    reduction += 1
+                if is_pv:
+                    reduction -= 1
+                h = history[us, from_sq, to_sq]
+                if h > 4000:
+                    reduction -= 1
+                elif h < -4000:
+                    reduction += 1
+                if reduction > 0 and gives_check(state, move):
+                    reduction -= 1
+                reduction = max(0, min(reduction, depth - 2))
 
             score = -alpha_beta(
                 state,
@@ -542,6 +519,7 @@ def alpha_beta(
                 tt_bound,
                 tt_age,
                 tt_static_eval,
+                extensions,
             )
 
             if score > alpha and reduction > 0:
@@ -568,6 +546,7 @@ def alpha_beta(
                     tt_bound,
                     tt_age,
                     tt_static_eval,
+                    extensions,
                 )
 
             if is_pv and alpha < score < beta:
@@ -594,6 +573,7 @@ def alpha_beta(
                     tt_bound,
                     tt_age,
                     tt_static_eval,
+                    extensions,
                 )
 
         unmake_move(state, undo_stack, ply)
@@ -613,7 +593,25 @@ def alpha_beta(
                         if killers[ply, 0] != move:
                             killers[ply, 1] = killers[ply, 0]
                             killers[ply, 0] = move
-                        history[us, from_sq, to_sq] += depth * depth
+                        # History gravity on beta-cutoff
+                        bonus = min(depth * depth, 400)
+                        cur = history[us, from_sq, to_sq]
+                        history[us, from_sq, to_sq] = cur + bonus - (cur * abs(bonus)) // 16384
+                        # Apply malus to non-cutoff quiet moves previously tried at this node
+                        for j in range(i):
+                            prev_m = moves[j]
+                            prev_to = (prev_m >> 6) & 0x3F
+                            prev_flags = (prev_m >> 12) & 0xF
+                            if (
+                                piece_type_at(state, prev_to) == -1
+                                and prev_flags != EN_PASSANT
+                                and prev_flags < KNIGHT_PROMO
+                            ):
+                                prev_from = prev_m & 0x3F
+                                prev_cur = history[us, prev_from, prev_to]
+                                history[us, prev_from, prev_to] = (
+                                    prev_cur - bonus - (prev_cur * abs(bonus)) // 16384
+                                )
 
                     store_tt(
                         hash_val,
@@ -701,7 +699,9 @@ def search_root(
 
     moves = moves_stack[0]
     num_moves = generate_moves(state, moves, captures_only=False)
-    sort_moves(state, moves, num_moves, tt_move_val, 0, killers, history, scores_stack[0])
+    scores = scores_stack[0]
+    for i in range(num_moves):
+        scores[i] = score_move(state, moves[i], tt_move_val, 0, killers, history)
 
     best_move = NO_MOVE
     best_score = -INF
@@ -711,6 +711,7 @@ def search_root(
     us = int(state[TURN])
 
     for i in range(num_moves):
+        pick_move(moves, scores, num_moves, i)
         move = moves[i]
         from_sq = move & 0x3F
         to_sq = (move >> 6) & 0x3F
@@ -721,14 +722,6 @@ def search_root(
         )
 
         make_move(state, undo_stack, 0, move)
-        moved_side = 1 - int(state[TURN])
-        king_bb = state[P_KING] & state[C_WHITE + moved_side]
-        king_sq = _bit_length(king_bb) - 1
-
-        if is_sq_attacked(state, king_sq, 1 - moved_side):
-            unmake_move(state, undo_stack, 0)
-            continue
-
         legal_moves += 1
 
         if legal_moves == 1:
@@ -755,12 +748,24 @@ def search_root(
                 tt_bound,
                 tt_age,
                 tt_static_eval,
+                0,
             )
         else:
             reduction = 0
             if depth >= 3 and legal_moves >= 4 and not is_tactical and not in_check:
                 reduction = 1
-                reduction = min(reduction, depth - 2)
+                if legal_moves >= 6:
+                    reduction += 1
+                if depth >= 6 and legal_moves >= 12:
+                    reduction += 1
+                h = history[us, from_sq, to_sq]
+                if h > 4000:
+                    reduction -= 1
+                elif h < -4000:
+                    reduction += 1
+                if reduction > 0 and gives_check(state, move):
+                    reduction -= 1
+                reduction = max(0, min(reduction, depth - 2))
 
             score = -alpha_beta(
                 state,
@@ -785,6 +790,7 @@ def search_root(
                 tt_bound,
                 tt_age,
                 tt_static_eval,
+                0,
             )
 
             if score > alpha and reduction > 0:
@@ -811,6 +817,7 @@ def search_root(
                     tt_bound,
                     tt_age,
                     tt_static_eval,
+                    0,
                 )
 
             if alpha < score < beta:
@@ -837,6 +844,7 @@ def search_root(
                     tt_bound,
                     tt_age,
                     tt_static_eval,
+                    0,
                 )
 
         unmake_move(state, undo_stack, 0)
@@ -859,7 +867,23 @@ def search_root(
                     if killers[0, 0] != move:
                         killers[0, 1] = killers[0, 0]
                         killers[0, 0] = move
-                    history[us, from_sq, to_sq] += depth * depth
+                    bonus = min(depth * depth, 400)
+                    cur = history[us, from_sq, to_sq]
+                    history[us, from_sq, to_sq] = cur + bonus - (cur * abs(bonus)) // 16384
+                    for j in range(i):
+                        prev_m = moves[j]
+                        prev_to = (prev_m >> 6) & 0x3F
+                        prev_flags = (prev_m >> 12) & 0xF
+                        if (
+                            piece_type_at(state, prev_to) == -1
+                            and prev_flags != EN_PASSANT
+                            and prev_flags < KNIGHT_PROMO
+                        ):
+                            prev_from = prev_m & 0x3F
+                            prev_cur = history[us, prev_from, prev_to]
+                            history[us, prev_from, prev_to] = (
+                                prev_cur - bonus - (prev_cur * abs(bonus)) // 16384
+                            )
 
                 store_tt(
                     hash_val,

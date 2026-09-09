@@ -10,12 +10,13 @@ import numpy as np
 
 from src.board import Board, move_to_uci
 from src.constants import INF, MATE_SCORE, MATE_THRESHOLD, MAX_PLY, NO_MOVE, STATE_SIZE
+from src.move_ordering import order_moves
 from src.search_numba import (
     board_to_state,
     search_root,
 )
 from src.time_manager import DEFAULT_TIME_CONFIG, TimeConfig, TimeManager
-from src.tt import create_tt_arrays
+from src.tt import create_tt_arrays, probe_tt
 
 # Libc clock for microsecond time tracking
 libc = ctypes.CDLL(None)
@@ -179,16 +180,27 @@ class Bot:
             self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
             return legal_moves[0]
 
+        # Prioritize known TT move or best-ordered move for safe emergency fallback
+        found, tt_move_val, _, _, _, _ = probe_tt(
+            np.uint64(board.hash),
+            *self.tt_arrays,
+        )
+        if found and tt_move_val in legal_moves:
+            default_move = tt_move_val
+        else:
+            ordered = order_moves(board, legal_moves, tt_move=tt_move_val if found else 0)
+            default_move = ordered[0]
+
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
-            self.best_move = legal_moves[0]
+            self.best_move = default_move
             self.nodes = 0
             self.completed_depth = 0
             self.best_score = 0
             self.runner_up_score = -INF
             self.root_score_gap = None
-            self._record_selected_move(board, legal_moves[0])
+            self._record_selected_move(board, default_move)
             self._record_timing(0, None, 0.0, False, False, False, None, "request-deadline")
-            return legal_moves[0]
+            return default_move
 
         state = board_to_state(board)
         start_t = self.time_mgr.elapsed()
@@ -222,7 +234,7 @@ class Bot:
         self.killers.fill(0)
         self.history //= 2
 
-        best_move = legal_moves[0]
+        best_move = default_move
         best_score = 0
         prev_score: int | None = None
         prev_move = NO_MOVE

@@ -25,6 +25,29 @@ from src.zobrist import (
     NB_TURN_KEY,
 )
 
+_DEBRUIJN64 = np.uint64(0x03F79D71B4CB0A89)
+_LSB_INDEX = np.array(
+    (
+        0,  1, 48,  2, 57, 49, 28,  3,
+        61, 58, 50, 42, 38, 29, 17,  4,
+        62, 55, 59, 36, 53, 51, 43, 22,
+        45, 39, 33, 30, 24, 18, 12,  5,
+        63, 47, 56, 27, 60, 41, 37, 16,
+        54, 35, 52, 21, 44, 32, 23, 11,
+        46, 26, 40, 15, 34, 20, 31, 10,
+        25, 14, 19,  9, 13,  8,  7,  6,
+    ),
+    dtype=np.uint8,
+)
+
+
+@njit(cache=False)
+def lsb_sq(bb: int | np.uint64) -> int:
+    """Least significant bit index using 64-bit De Bruijn multiplication."""
+    u = np.uint64(bb)
+    lsb = u & (np.uint64(0) - u)
+    return int(_LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)])
+
 
 @njit(cache=False)
 def _bit_length(n: int) -> int:
@@ -94,7 +117,7 @@ def _has_legal_en_passant(state: np.ndarray, color: int, ep_sq: int) -> bool:
         return False
 
     them = 1 - color
-    king_sq = _bit_length(state[P_KING] & state[C_WHITE + color]) - 1
+    king_sq = lsb_sq(state[P_KING] & state[C_WHITE + color])
     captured_sq = ep_sq - 8 if color == WHITE else ep_sq + 8
     occupied = state[C_WHITE] | state[C_BLACK]
     enemy_diag = (state[P_BISHOP] | state[P_QUEEN]) & state[C_WHITE + them]
@@ -102,7 +125,7 @@ def _has_legal_en_passant(state: np.ndarray, color: int, ep_sq: int) -> bool:
 
     while candidates:
         from_bit = candidates & (~candidates + np.uint64(1))
-        from_sq = _bit_length(from_bit) - 1
+        from_sq = lsb_sq(from_bit)
         candidates &= candidates - np.uint64(1)
         occupied_after = (
             occupied
@@ -238,7 +261,7 @@ def is_sq_attacked(state: np.ndarray, sq: int, by_color: int) -> bool:
     if NB_KNIGHT_ATTACKS[sq] & opp_knights:
         return True
 
-    opp_king_sq = _bit_length(state[P_KING] & state[C_WHITE + by_color]) - 1
+    opp_king_sq = lsb_sq(state[P_KING] & state[C_WHITE + by_color])
     if NB_KING_ATTACKS[opp_king_sq] & (np.uint64(1) << np.uint64(sq)):
         return True
 
@@ -260,27 +283,20 @@ def is_in_check(state: np.ndarray) -> bool:
     king_bb = state[P_KING] & state[C_WHITE + us]
     if not king_bb:
         return False
-    king_sq = _bit_length(king_bb) - 1
+    king_sq = lsb_sq(king_bb)
     return is_sq_attacked(state, king_sq, 1 - us)
-
-
-from src.evaluation import _evaluate_kernel
 
 
 @njit(cache=False)
 def evaluate(state: np.ndarray) -> int:
-    score, _ = _evaluate_kernel(
-        state[P_PAWN],
-        state[P_KNIGHT],
-        state[P_BISHOP],
-        state[P_ROOK],
-        state[P_QUEEN],
-        state[P_KING],
-        state[C_WHITE],
-        state[C_BLACK],
-        state[TURN] == WHITE,
-    )
-    return score
+    us = int(state[TURN])
+    them = 1 - us
+    mg = np.int64(state[MG_SCORE_W + us]) - np.int64(state[MG_SCORE_W + them])
+    eg = np.int64(state[EG_SCORE_W + us]) - np.int64(state[EG_SCORE_W + them])
+    phase = min(int(state[GAME_PHASE]), 24)
+    eg_phase = 24 - phase
+    score = mg * phase + eg * eg_phase
+    return int(score // 24 if score >= 0 else -((-score) // 24))
 
 
 @njit(cache=False)
@@ -294,7 +310,7 @@ def gives_check(state: np.ndarray, move: int) -> bool:
     opp_king_bb = state[P_KING] & state[C_WHITE + them]
     if not opp_king_bb:
         return False
-    opp_king_sq = _bit_length(opp_king_bb) - 1
+    opp_king_sq = lsb_sq(opp_king_bb)
 
     piece = piece_type_at(state, from_sq)
     moved_piece = piece
@@ -374,19 +390,19 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     king_bb = state[P_KING] & own_pieces
     if not king_bb:
         return 0
-    king_sq = _bit_length(king_bb) - 1
+    king_sq = lsb_sq(king_bb)
 
     occupied_no_king = occupied ^ king_bb
     opp_diag = (state[P_BISHOP] | state[P_QUEEN]) & other_pieces
     opp_orth = (state[P_ROOK] | state[P_QUEEN]) & other_pieces
     opp_pawns = state[P_PAWN] & other_pieces
     opp_knights = state[P_KNIGHT] & other_pieces
-    opp_king_sq = _bit_length(state[P_KING] & other_pieces) - 1
+    opp_king_sq = lsb_sq(state[P_KING] & other_pieces)
 
     king_targets = NB_KING_ATTACKS[king_sq] & (other_pieces if captures_only else ~own_pieces)
     while king_targets:
         lsb = king_targets & (~king_targets + np.uint64(1))
-        to_sq = _bit_length(lsb) - 1
+        to_sq = lsb_sq(lsb)
         king_targets &= king_targets - np.uint64(1)
 
         # Check if to_sq is attacked
@@ -420,7 +436,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         return count
 
     if num_checkers == 1:
-        checker_sq = _bit_length(checkers & (~checkers + np.uint64(1))) - 1
+        checker_sq = lsb_sq(checkers & (~checkers + np.uint64(1)))
         checker_type = piece_type_at(state, checker_sq)
         if checker_type == BISHOP or checker_type == ROOK or checker_type == QUEEN:
             check_mask = NB_RAY_BETWEEN[king_sq, checker_sq] | (
@@ -439,14 +455,14 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     )
     while pinners:
         lsb = pinners & (~pinners + np.uint64(1))
-        pinner_sq = _bit_length(lsb) - 1
+        pinner_sq = lsb_sq(lsb)
         pinners &= pinners - np.uint64(1)
         between = NB_RAY_BETWEEN[king_sq, pinner_sq]
         pieces_between = between & occupied
         if pieces_between != 0 and (pieces_between & (pieces_between - 1)) == 0:
             own_pinned = pieces_between & own_pieces
             if own_pinned:
-                pinned_sq = _bit_length(own_pinned) - 1
+                pinned_sq = lsb_sq(own_pinned)
                 pin_mask[pinned_sq] = between | (np.uint64(1) << np.uint64(pinner_sq))
                 pinned_pieces |= own_pinned
 
@@ -460,7 +476,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     pawns = state[P_PAWN] & active_own
     while pawns:
         lsb = pawns & (~pawns + np.uint64(1))
-        from_sq = _bit_length(lsb) - 1
+        from_sq = lsb_sq(lsb)
         pawns &= pawns - np.uint64(1)
 
         target_mask = movable_mask & pin_mask[from_sq]
@@ -601,7 +617,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     knights = state[P_KNIGHT] & active_own
     while knights:
         lsb = knights & (~knights + np.uint64(1))
-        from_sq = _bit_length(lsb) - 1
+        from_sq = lsb_sq(lsb)
         knights &= knights - np.uint64(1)
         targets = (
             NB_KNIGHT_ATTACKS[from_sq]
@@ -611,7 +627,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
-            to_sq = _bit_length(tlsb) - 1
+            to_sq = lsb_sq(tlsb)
             targets &= targets - np.uint64(1)
             flag = CAPTURE if (other_pieces & (np.uint64(1) << np.uint64(to_sq))) else QUIET
             count = _push_move(moves, count, from_sq | (to_sq << 6) | (flag << 12))
@@ -620,7 +636,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     bishops = state[P_BISHOP] & active_own
     while bishops:
         lsb = bishops & (~bishops + np.uint64(1))
-        from_sq = _bit_length(lsb) - 1
+        from_sq = lsb_sq(lsb)
         bishops &= bishops - np.uint64(1)
         targets = (
             bishop_attacks(from_sq, occupied)
@@ -630,7 +646,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
-            to_sq = _bit_length(tlsb) - 1
+            to_sq = lsb_sq(tlsb)
             targets &= targets - np.uint64(1)
             flag = CAPTURE if (other_pieces & (np.uint64(1) << np.uint64(to_sq))) else QUIET
             count = _push_move(moves, count, from_sq | (to_sq << 6) | (flag << 12))
@@ -639,7 +655,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     rooks = state[P_ROOK] & active_own
     while rooks:
         lsb = rooks & (~rooks + np.uint64(1))
-        from_sq = _bit_length(lsb) - 1
+        from_sq = lsb_sq(lsb)
         rooks &= rooks - np.uint64(1)
         targets = (
             rook_attacks(from_sq, occupied)
@@ -649,7 +665,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
-            to_sq = _bit_length(tlsb) - 1
+            to_sq = lsb_sq(tlsb)
             targets &= targets - np.uint64(1)
             flag = CAPTURE if (other_pieces & (np.uint64(1) << np.uint64(to_sq))) else QUIET
             count = _push_move(moves, count, from_sq | (to_sq << 6) | (flag << 12))
@@ -658,7 +674,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     queens = state[P_QUEEN] & active_own
     while queens:
         lsb = queens & (~queens + np.uint64(1))
-        from_sq = _bit_length(lsb) - 1
+        from_sq = lsb_sq(lsb)
         queens &= queens - np.uint64(1)
         targets = (
             queen_attacks(from_sq, occupied)
@@ -668,7 +684,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         )
         while targets:
             tlsb = targets & (~targets + np.uint64(1))
-            to_sq = _bit_length(tlsb) - 1
+            to_sq = lsb_sq(tlsb)
             targets &= targets - np.uint64(1)
             flag = CAPTURE if (other_pieces & (np.uint64(1) << np.uint64(to_sq))) else QUIET
             count = _push_move(moves, count, from_sq | (to_sq << 6) | (flag << 12))
@@ -681,7 +697,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
                 if (
                     king_sq == 4
                     and (state[P_ROOK] & own_pieces & (np.uint64(1) << np.uint64(7)))
-                    and not (occupied & np.uint64(0x60))
+                    and not (occupied & np.uint64(0x60))\
                     and not is_sq_attacked(state, 5, BLACK)
                     and not is_sq_attacked(state, 6, BLACK)
                 ):

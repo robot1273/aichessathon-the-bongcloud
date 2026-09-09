@@ -52,7 +52,7 @@ def create_tt_arrays(
 
 @njit(cache=False)
 def probe_tt(
-    hash_val: int,
+    hash_val: int | np.uint64,
     tt_hash: np.ndarray,
     tt_score: np.ndarray,
     tt_move: np.ndarray,
@@ -63,14 +63,21 @@ def probe_tt(
 ) -> tuple[bool, int, int, int, int, int]:
     """Returns (found, move, score, depth, bound, static_eval)"""
     idx = hash_val & (tt_hash.size - 1)
-    if tt_bound[idx] != BOUND_NONE and tt_hash[idx] == hash_val:
-        return True, tt_move[idx], tt_score[idx], tt_depth[idx], tt_bound[idx], tt_static_eval[idx]
+    if tt_hash[idx] == hash_val and tt_bound[idx] != BOUND_NONE:
+        return (
+            True,
+            int(tt_move[idx]),
+            int(tt_score[idx]),
+            int(tt_depth[idx]),
+            int(tt_bound[idx]),
+            int(tt_static_eval[idx]),
+        )
     return False, NO_MOVE, 0, 0, BOUND_NONE, 0
 
 
 @njit(cache=False)
 def store_tt(
-    hash_val: int,
+    hash_val: int | np.uint64,
     best_move: int,
     score: int,
     depth: int,
@@ -95,15 +102,12 @@ def store_tt(
     elif old_hash != hash_val:
         old_depth = tt_depth[idx]
         age_diff = (current_age - tt_age[idx]) & 0xFF
-        # Retain deep entries unless they are stale. Direct-mapped tables see
-        # frequent collisions, so unconditional replacement discards the work
-        # that gives iterative deepening and cross-move reuse their value.
-        replace = age_diff > 2 or depth >= old_depth - 2
+        # Replace if entry is from an older search or if incoming depth is >= old depth
+        replace = age_diff > 0 or depth >= old_depth
     else:
         old_depth = tt_depth[idx]
-        old_age = tt_age[idx]
-        age_diff = (current_age - old_age) & 0xFF
-        if depth > old_depth or age_diff > 2:
+        age_diff = (current_age - tt_age[idx]) & 0xFF
+        if depth >= old_depth or age_diff > 0:
             replace = True
         elif depth == old_depth and bound == BOUND_EXACT and tt_bound[idx] != BOUND_EXACT:
             replace = True
