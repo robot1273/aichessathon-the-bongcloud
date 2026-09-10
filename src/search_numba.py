@@ -21,6 +21,7 @@ from src.board_primitives import (
     lsb_sq,
     make_move,
     make_null_move,
+    may_give_check,
     piece_type_at,
     unmake_move,
     unmake_null_move,
@@ -32,6 +33,8 @@ from src.constants import (
     C_BLACK,
     C_WHITE,
     CASTLING,
+    EG_BONUS_B,
+    EG_BONUS_W,
     EG_SCORE_B,
     EG_SCORE_W,
     EN_PASSANT,
@@ -46,6 +49,8 @@ from src.constants import (
     MATE_SCORE,
     MATE_THRESHOLD,
     MAX_PLY,
+    MG_BONUS_B,
+    MG_BONUS_W,
     MG_SCORE_B,
     MG_SCORE_W,
     NO_MOVE,
@@ -227,6 +232,7 @@ def quiescence(
     stats: np.ndarray,
 ) -> int:
     stats[0] += 1
+    stats[4] += 1  # qnodes (S7)
     if (stats[0] & 1023) == 0:
         if stats[3] > 0 and clock() >= stats[3]:
             stats[1] = 1
@@ -345,9 +351,14 @@ def alpha_beta(
         return 0
 
     in_check = is_in_check(state)
-    if in_check and ply < MAX_PLY - 2 and extensions < 4:
-        depth += 1
-        extensions += 1
+    # S6: bound check extensions. Skip when near fifty-move draw (line draws
+    # anyway) and cap horizon extensions (depth<=0 already goes to quiescence
+    # evasion search; extending there converts cheap qnodes into full-width
+    # nodes and risks perpetual-check explosion).
+    if in_check and ply < MAX_PLY - 2 and extensions < 4 and state[HALFMOVE] < 90:
+        if depth > 0 or extensions < 2:
+            depth += 1
+            extensions += 1
 
     # Checkmate takes precedence over claimed draws.
     if ply > 0 and is_draw(state, undo_stack, ply, hash_history, hist_len):
@@ -373,14 +384,20 @@ def alpha_beta(
     found, tt_move_val, tt_score_val, tt_depth_val, tt_bound_val, tt_static_val = probe_tt(
         hash_val, tt_hash, tt_score, tt_move, tt_depth, tt_bound, tt_age, tt_static_eval
     )
+    stats[5] += 1  # tt_probes (S7)
+    if found:
+        stats[6] += 1  # tt_hits
 
     if found and not is_pv and tt_depth_val >= depth:
         adjusted_score = score_from_tt(tt_score_val, ply)
         if tt_bound_val == BOUND_EXACT:
+            stats[7] += 1
             return adjusted_score
         if tt_bound_val == BOUND_LOWER and adjusted_score >= beta:
+            stats[7] += 1
             return beta
         if tt_bound_val == BOUND_UPPER and adjusted_score <= alpha:
+            stats[7] += 1
             return alpha
 
     if depth <= 0:
@@ -400,6 +417,7 @@ def alpha_beta(
     if not is_pv and not in_check and depth <= 6 and abs(beta) < MATE_THRESHOLD:
         rfp_margin = 80 * depth
         if static_eval - rfp_margin >= beta:
+            stats[9] += 1
             return static_eval
 
     # Null Move Pruning (NMP)
@@ -448,6 +466,7 @@ def alpha_beta(
             return 0
 
         if null_score >= beta:
+            stats[10] += 1
             return beta
 
     moves = moves_stack[ply]
@@ -460,6 +479,9 @@ def alpha_beta(
     best_score = -INF
     alpha_orig = alpha
     legal_moves = 0
+    # S2: enemy king square for the may_give_check gate (1 lsb per node).
+    _opp_king_bb = state[P_KING] & state[C_WHITE + (1 - us)]
+    opp_king_sq = lsb_sq(_opp_king_bb) if _opp_king_bb != np.uint64(0) else -1
 
     for i in range(num_moves):
         pick_move(moves, scores, num_moves, i)
@@ -471,6 +493,8 @@ def alpha_beta(
         is_tactical = bool(flags & CAPTURE or flags >= KNIGHT_PROMO)
 
         # Futility Pruning: verify arithmetic margin before expensive raycast
+        # S2: may_give_check gate (coordinate/table pre-filter) avoids the
+        # up-to-4-raycast gives_check() on geometrically impossible checks.
         if (
             not is_pv
             and not in_check
@@ -478,8 +502,13 @@ def alpha_beta(
             and legal_moves > 0
             and not is_tactical
             and (static_eval + 120 * depth <= alpha)
-            and not gives_check(state, move)
+            and opp_king_sq >= 0
+            and not (
+                may_give_check(state, from_sq, to_sq, flags, opp_king_sq, us)
+                and gives_check(state, move)
+            )
         ):
+            stats[11] += 1
             continue
 
         make_move(state, undo_stack, ply, move)
@@ -527,9 +556,17 @@ def alpha_beta(
                     reduction -= 1
                 elif h < -4000:
                     reduction += 1
-                if reduction > 0 and gives_check(state, move):
+                # S2 gate: skip raycasts unless geometrically possible.
+                if (
+                    reduction > 0
+                    and opp_king_sq >= 0
+                    and may_give_check(state, from_sq, to_sq, flags, opp_king_sq, us)
+                    and gives_check(state, move)
+                ):
                     reduction -= 1
                 reduction = max(0, min(reduction, depth - 2))
+                if reduction > 0:
+                    stats[12] += 1
 
             score = -alpha_beta(
                 state,
@@ -660,6 +697,7 @@ def alpha_beta(
                         tt_age,
                         tt_static_eval,
                     )
+                    stats[8] += 1
                     return beta
 
     if legal_moves == 0:
@@ -724,6 +762,9 @@ def search_root(
     found, tt_move_val, _, _, _, tt_static_val = probe_tt(
         hash_val, tt_hash, tt_score, tt_move, tt_depth, tt_bound, tt_age, tt_static_eval
     )
+    stats[5] += 1
+    if found:
+        stats[6] += 1
 
     in_check = is_in_check(state)
     static_eval = evaluate(state) if not in_check else -INF
@@ -740,6 +781,8 @@ def search_root(
     alpha_orig = alpha
     legal_moves = 0
     us = int(state[TURN])
+    _root_opp_bb = state[P_KING] & state[C_WHITE + (1 - us)]
+    root_opp_king_sq = lsb_sq(_root_opp_bb) if _root_opp_bb != np.uint64(0) else -1
 
     for i in range(num_moves):
         pick_move(moves, scores, num_moves, i)
@@ -792,9 +835,17 @@ def search_root(
                     reduction -= 1
                 elif h < -4000:
                     reduction += 1
-                if reduction > 0 and gives_check(state, move):
+                # S2 gate (root): skip raycasts unless geometrically possible.
+                if (
+                    reduction > 0
+                    and root_opp_king_sq >= 0
+                    and may_give_check(state, from_sq, to_sq, flags, root_opp_king_sq, us)
+                    and gives_check(state, move)
+                ):
                     reduction -= 1
                 reduction = max(0, min(reduction, depth - 2))
+                if reduction > 0:
+                    stats[12] += 1
 
             score = -alpha_beta(
                 state,
@@ -978,7 +1029,7 @@ def iterative_deepening(
     killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
     history = np.zeros((2, 64, 64), dtype=np.int32)
 
-    stats = np.zeros(4, dtype=np.int64)
+    stats = np.zeros(13, dtype=np.int64)
     start_ticks = clock()
     stats[0] = 0
     stats[1] = 0
@@ -1050,5 +1101,12 @@ def board_to_state(board: "Board") -> np.ndarray:
     state[EG_SCORE_B] = np.uint64(board.eg_score[BLACK] & 0xFFFFFFFFFFFFFFFF)
 
     state[GAME_PHASE] = np.uint64(board.game_phase)
+
+    # S3: seed incremental structural bonuses from the Python board (which
+    # maintains them via _update_bonus). Same wrap-uint64 encoding as scores.
+    state[MG_BONUS_W] = np.uint64(board.mg_bonus[WHITE] & 0xFFFFFFFFFFFFFFFF)
+    state[MG_BONUS_B] = np.uint64(board.mg_bonus[BLACK] & 0xFFFFFFFFFFFFFFFF)
+    state[EG_BONUS_W] = np.uint64(board.eg_bonus[WHITE] & 0xFFFFFFFFFFFFFFFF)
+    state[EG_BONUS_B] = np.uint64(board.eg_bonus[BLACK] & 0xFFFFFFFFFFFFFFFF)
 
     return state
