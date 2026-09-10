@@ -103,6 +103,8 @@ class AdaptiveEvaluator:
         trace_timing: bool = False,
         require_positive_root_gap: bool = False,
         aspiration_retry_reserve: float = 2.0,
+        use_book: bool = False,
+        use_tb: bool = True,
     ) -> None:
         self.stockfish_path = stockfish_path
         self.current_skill = max(0, min(20, initial_skill))
@@ -112,6 +114,8 @@ class AdaptiveEvaluator:
         self.trace_timing = trace_timing
         self.require_positive_root_gap = require_positive_root_gap
         self.aspiration_retry_reserve = aspiration_retry_reserve
+        self.use_book = use_book
+        self.use_tb = use_tb
 
     def run_benchmark(
         self,
@@ -127,7 +131,8 @@ class AdaptiveEvaluator:
         print(f"Starting Engine Match ({total_games} Games)")
         print(
             f"Time Control: {self.base_time_ms}ms + {self.inc_ms}ms inc "
-            f"| Adaptive Skill: {adapt_skill} | Workers: {workers}"
+            f"| Adaptive Skill: {adapt_skill} | Workers: {workers} "
+            f"| Book: {self.use_book} | TB: {self.use_tb}"
         )
         print("=" * 65)
 
@@ -203,6 +208,8 @@ class AdaptiveEvaluator:
             increment_s=self.inc_ms / 1000,
             time_config=time_config,
             trace_timing=self.trace_timing,
+            use_book=self.use_book,
+            use_tb=self.use_tb,
         )
 
         bot_clock = float(self.base_time_ms)
@@ -434,6 +441,16 @@ def main() -> None:
         default=2.0,
         help="Predicted-iteration multiples reserved before aspiration",
     )
+    parser.add_argument(
+        "--book",
+        action="store_true",
+        help="Enable vendored Polyglot opening book",
+    )
+    parser.add_argument(
+        "--no-tb",
+        action="store_true",
+        help="Disable Syzygy tablebase probing",
+    )
 
     args = parser.parse_args()
     if args.workers < 1:
@@ -446,6 +463,8 @@ def main() -> None:
         trace_timing=args.trace_timing,
         require_positive_root_gap=args.positive_root_gap,
         aspiration_retry_reserve=args.aspiration_reserve,
+        use_book=args.book,
+        use_tb=not args.no_tb,
     )
 
     evaluator.run_benchmark(

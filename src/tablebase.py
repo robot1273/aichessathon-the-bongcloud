@@ -172,13 +172,12 @@ def _pick_loss(
     return best_move
 
 
-def tb_root_move(
-    board: Board,
-    legal_moves: list[int],
-    game_hashes: list[int] | None = None,
-) -> int | None:
-    """Return an exact tablebase move, or None to fall through to search."""
-    if board.castling != 0 or not legal_moves:
+def tb_probe_wdl(board: Board) -> int | None:
+    """Decisive root WDL (+2/-2) or None (draws, cursed/blessed, missing).
+
+    Never raises on clock. Only game-legal positions may be probed.
+    """
+    if board.castling != 0:
         return None
     occupied = board.colours[0] | board.colours[1]
     if occupied.bit_count() > TB_MAX_PIECES:
@@ -194,12 +193,55 @@ def tb_root_move(
         wdl = tb.get_wdl(cb)
     except (KeyError, OSError, ValueError):
         return None
-    if wdl is None or wdl in (0, 1, -1):
+    if wdl in (2, -2):
+        return wdl
+    return None
+
+
+def tb_win_move(
+    board: Board,
+    legal_moves: list[int],
+    game_hashes: list[int] | None = None,
+) -> int | None:
+    """DTZ-minimax winning move with fifty-move + repetition guards."""
+    tb = _get_tablebase()
+    if tb is None or not legal_moves:
+        return None
+    try:
+        cb = chess.Board(board.fen())
+    except ValueError:
         return None
     hashes: list[int] = game_hashes if game_hashes is not None else []
     try:
-        if wdl == 2:
-            return _pick_win(tb, cb, board, legal_moves, hashes)
+        return _pick_win(tb, cb, board, legal_moves, hashes)
+    except (KeyError, OSError, ValueError, IndexError):
+        return None
+
+
+def tb_loss_move(board: Board, legal_moves: list[int]) -> int | None:
+    """DTZ-max delaying move (instant). Draw-snatching included."""
+    tb = _get_tablebase()
+    if tb is None or not legal_moves:
+        return None
+    try:
+        cb = chess.Board(board.fen())
+    except ValueError:
+        return None
+    try:
         return _pick_loss(tb, cb, legal_moves)
     except (KeyError, OSError, ValueError, IndexError):
         return None
+
+
+def tb_root_move(
+    board: Board,
+    legal_moves: list[int],
+    game_hashes: list[int] | None = None,
+) -> int | None:
+    """Legacy instant entry: losses delay at once, wins convert at once."""
+    wdl = tb_probe_wdl(board)
+    if wdl == -2:
+        return tb_loss_move(board, legal_moves)
+    if wdl == 2:
+        return tb_win_move(board, legal_moves, game_hashes)
+    return None

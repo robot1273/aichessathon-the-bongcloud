@@ -9,13 +9,14 @@ from typing import Any
 import numpy as np
 
 from src.board import Board, move_to_uci
+from src.book import book_move, make_rng
 from src.constants import INF, MATE_SCORE, MATE_THRESHOLD, MAX_PLY, NO_MOVE, STATE_SIZE
 from src.move_ordering import order_moves
 from src.search_numba import (
     board_to_state,
     search_root,
 )
-from src.tablebase import tb_root_move
+from src.tablebase import tb_loss_move, tb_probe_wdl, tb_win_move
 from src.time_manager import DEFAULT_TIME_CONFIG, TimeConfig, TimeManager
 from src.tt import create_tt_arrays, probe_tt
 
@@ -106,12 +107,16 @@ class Bot:
         increment_s: float = INCREMENT_S,
         time_config: TimeConfig = DEFAULT_TIME_CONFIG,
         trace_timing: bool = False,
+        use_book: bool = False,
+        use_tb: bool = True,
     ) -> None:
         self.tt_exp_size = tt_exp_size
         self.collect_stats = collect_stats
         self.increment_s = increment_s
         self.time_config = time_config
         self.trace_timing = trace_timing
+        self.use_book = use_book
+        self.use_tb = use_tb
         self.current_age = 0
         self.tt_arrays = create_tt_arrays(tt_exp_size)
         self.time_mgr = TimeManager(increment_s=increment_s, config=time_config)
@@ -135,6 +140,8 @@ class Bot:
         self.last_timing: MoveTiming | None = None
         self._game_hashes: list[int] = []
         self._pending_position: Board | None = None
+        self._book_rng = make_rng()
+        self._book_out = False
 
         self._warmup_jit()
 
@@ -216,27 +223,48 @@ class Bot:
             self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
             return legal_moves[0]
 
-        # Exact tablebase move (<=4 pieces, no castling). Instant and exact:
-        # won endings convert, lost endings resist, draws fall to search.
-        # Real-game mode only: fixed-depth callers (benchmarks, tests) measure
-        # the search itself, and the platform never passes depth.
-        if depth is None:
-            tb_move = tb_root_move(board, legal_moves, self._game_hashes)
-            if tb_move is not None:
-                self.best_move = tb_move
+        # Exact tablebase handling (<=4 pieces, no castling).
+        # Losses delay at once (DTZ-max, instant). Wins search first for a
+        # fast mate and fall back to exact DTZ conversion below when the
+        # search finds no mate (DTZ lines always convert but can wander).
+        # Real-game mode only: fixed-depth callers (benchmarks, tests)
+        # measure the search itself, and the platform never passes depth.
+        tb_win_pending = False
+        if depth is None and self.use_tb:
+            tb_wdl = tb_probe_wdl(board)
+            if tb_wdl == -2:
+                tb_move = tb_loss_move(board, legal_moves)
+                if tb_move is not None:
+                    self.best_move = tb_move
+                    self.nodes = 1
+                    self.completed_depth = 1
+                    self.best_score = 0
+                    self.runner_up_score = -INF
+                    self.root_score_gap = None
+                    self._record_selected_move(board, tb_move)
+                    self._record_timing(
+                        1, None, 0.0, False, False, False, None, "tablebase"
+                    )
+                    return tb_move
+            elif tb_wdl == 2:
+                tb_win_pending = True
+
+        # Opening book (vendored master-game statistics, opt-in via use_book:
+        # A/B showed GM-popular variety picks cost Elo vs our search at
+        # 12s+0.05s). Instant while in book; out permanently after first miss.
+        if depth is None and self.use_book and not self._book_out:
+            book_hit = book_move(board, legal_moves, self._book_rng)
+            if book_hit is not None:
+                self.best_move = book_hit
                 self.nodes = 1
                 self.completed_depth = 1
                 self.best_score = 0
                 self.runner_up_score = -INF
                 self.root_score_gap = None
-                self._record_selected_move(board, tb_move)
-                self._record_timing(1, None, 0.0, False, False, False, None, "tablebase")
-                return tb_move
-
-        # NOTE: a vendored Polyglot book (src/book.py) was A/B tested and
-        # removed: at 12s+0.5s it scored 62.5% over 12 games vs 75% without
-        # it (baseline 75% over 18). Our depth-12+ search outplays GM-popular
-        # variety picks, and time saved is worthless without time pressure.
+                self._record_selected_move(board, book_hit)
+                self._record_timing(1, None, 0.0, False, False, False, None, "book")
+                return book_hit
+            self._book_out = True
 
         default_move = legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
@@ -551,6 +579,15 @@ class Bot:
             if abs(best_score) > MATE_THRESHOLD:
                 stop_reason = "mate"
                 break
+
+        # TB-win fallback: search found no mate, so convert exactly. Keeps
+        # the fast search mate when there is one, guarantees conversion
+        # otherwise (also covers repetition-blindness and hard-limit aborts).
+        if tb_win_pending and abs(best_score) <= MATE_THRESHOLD and best_move != NO_MOVE:
+            dtz_move = tb_win_move(board, legal_moves, self._game_hashes)
+            if dtz_move is not None and dtz_move != best_move:
+                best_move = dtz_move
+                stop_reason = "tablebase"
 
         self.best_move = best_move
         self.best_score = best_score
