@@ -101,7 +101,7 @@ class AdaptiveEvaluator:
         inc_ms: int = 50,
         tolerance_buffer_ms: int = 150,  # Max allowed engine latency over clock limit
         trace_timing: bool = False,
-        require_positive_root_gap: bool = False,
+        require_positive_root_gap: bool = True,
         aspiration_retry_reserve: float = 2.0,
         use_tb: bool = True,
     ) -> None:
@@ -433,7 +433,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--positive-root-gap",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Ignore zero root gaps produced by PVS bounds",
     )
     parser.add_argument(

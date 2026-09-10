@@ -15,7 +15,7 @@ from src.search_numba import (
     board_to_state,
     search_root,
 )
-from src.tablebase import tb_loss_move, tb_probe_wdl, tb_win_move
+from src.tablebase import RootTablebase, initialize_tablebase, tb_probe_root
 from src.time_manager import DEFAULT_TIME_CONFIG, TimeConfig, TimeManager
 from src.tt import create_tt_arrays, probe_tt
 
@@ -138,6 +138,8 @@ class Bot:
         self._game_hashes: list[int] = []
         self._pending_position: Board | None = None
 
+        if self.use_tb:
+            initialize_tablebase()
         self._warmup_jit()
 
     def _warmup_jit(self) -> None:
@@ -218,31 +220,23 @@ class Bot:
             self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
             return legal_moves[0]
 
-        # Exact tablebase handling (<=4 pieces, no castling).
-        # Losses delay at once (DTZ-max, instant). Wins search first for a
-        # fast mate and fall back to exact DTZ conversion below when the
-        # search finds no mate (DTZ lines always convert but can wander).
-        # Real-game mode only: fixed-depth callers (benchmarks, tests)
-        # measure the search itself, and the platform never passes depth.
-        tb_win_pending = False
+        # Prepare an exact root policy before search. Fixed-depth callers are
+        # benchmarks/tests of the search itself; the platform never sets depth.
+        tb_root: RootTablebase | None = None
         if depth is None and self.use_tb:
-            tb_wdl = tb_probe_wdl(board)
-            if tb_wdl == -2:
-                tb_move = tb_loss_move(board, legal_moves)
-                if tb_move is not None:
-                    self.best_move = tb_move
-                    self.nodes = 1
-                    self.completed_depth = 1
-                    self.best_score = 0
-                    self.runner_up_score = -INF
-                    self.root_score_gap = None
-                    self._record_selected_move(board, tb_move)
-                    self._record_timing(
-                        1, None, 0.0, False, False, False, None, "tablebase"
-                    )
-                    return tb_move
-            elif tb_wdl == 2:
-                tb_win_pending = True
+            tb_root = tb_probe_root(board, legal_moves, self._game_hashes)
+            if tb_root is not None and tb_root.wdl == -2:
+                self.best_move = tb_root.fallback_move
+                self.nodes = 1
+                self.completed_depth = 1
+                self.best_score = 0
+                self.runner_up_score = -INF
+                self.root_score_gap = None
+                self._record_selected_move(board, tb_root.fallback_move)
+                self._record_timing(
+                    1, None, 0.0, False, False, False, None, "tablebase"
+                )
+                return tb_root.fallback_move
 
         default_move = legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
@@ -559,33 +553,12 @@ class Bot:
                 stop_reason = "mate"
                 break
 
-        # TB-win endgame: trust the search's technique (it sees mates and
-        # winning plans), with exact DTZ as the safety net. Pure-DTZ play
-        # wanders (it minimizes to the next zeroing, not to mate) and
-        # alternating the two salads draws won endings. DTZ takes over when
-        # the search is blind (sub-200 score in a TB win), aborted, or about
-        # to repeat a position (shuffling draws won KBNK-type endings while
-        # DTZ triangulates correctly); real mates always stand.
-        if tb_win_pending and best_move != NO_MOVE:
-            search_mated = abs(best_score) > MATE_THRESHOLD
-            search_blind = aborted_depth is not None or abs(best_score) < 200
-            if not search_mated and not search_blind:
-                tmp = board.copy()
-                try:
-                    tmp.make_move(best_move)
-                    # Veto only the fatal case (third occurrence = instant
-                    # draw claim). Lighter triangulation repeats must stand:
-                    # vetoing those broke KBNK conversions by forcing DTZ at
-                    # exactly the wrong moments.
-                    search_repeats = self._game_hashes.count(tmp.hash) >= 2
-                except (ValueError, IndexError):
-                    search_repeats = False
-                search_blind = search_repeats
-            if not search_mated and search_blind:
-                dtz_move = tb_win_move(board, legal_moves, self._game_hashes)
-                if dtz_move is not None:
-                    best_move = dtz_move
-                    stop_reason = "tablebase"
+        # Search supplies technique and swindling chances, but never gets to
+        # discard a tablebase win/draw. Probing already happened before the
+        # deadline, so this fallback is constant-time even after an abort.
+        if tb_root is not None and best_move not in tb_root.search_moves:
+            best_move = tb_root.fallback_move
+            stop_reason = "tablebase"
 
         self.best_move = best_move
         self.best_score = best_score

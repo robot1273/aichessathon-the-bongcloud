@@ -1,7 +1,7 @@
 """Endgame conversion suite: bot always holds the winning side.
 
-Eight verified winning endgames (seven TB-covered, one 5-man for the
-search), each played as White and mirrored for Black: 16 games total.
+Eight verified winning endgames (six TB-covered, two search-only), each
+played as White and mirrored for Black: 16 games per repetition.
 Measures conversion (wins), resistance to swindles (losses/draws), and
 plies-to-mate for wins. TB-covered positions assert WDL==+2 at startup
 when tb/ is present, so silently-drawn FEN typos fail loudly instead.
@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import chess
 
@@ -28,7 +29,7 @@ BASE_FENS: list[tuple[str, str]] = [
     ("KBNK", "7k/8/8/8/8/8/8/KBN5 w - - 0 1"),
     ("KRPvKR", "3rk3/8/8/8/8/8/3RP3/3K4 w - - 0 1"),
     ("KRvKP", "6k1/8/8/8/8/6p1/6R1/6K1 w - - 0 1"),
-    # 5-man, no TB coverage: Stockfish depth-24 reports forced mate.
+    # 6-man, no TB coverage: Stockfish depth-24 reports forced mate.
     ("KQvKRP", "3rk3/8/8/8/8/2p5/3QP3/3K4 w - - 0 1"),
 ]
 
@@ -52,14 +53,15 @@ def verify_tb_wins(fens: list[str], names: list[str]) -> None:
     try:
         import chess.syzygy
 
-        tb = chess.syzygy.open_tablebase("tb")
+        tb_path = Path(__file__).resolve().parent.parent.parent / "tb"
+        tb = chess.syzygy.open_tablebase(str(tb_path))
     except OSError:
         print("tb/ unavailable, skipping WDL verification")
         return
     for name, fen in zip(names, fens, strict=True):
-        if name.startswith("KQvKRP"):
-            continue  # 5-man, SF-verified instead
         board = chess.Board(fen)
+        if len(board.piece_map()) > 4:
+            continue
         wdl = tb.get_wdl(board)
         if wdl != 2:
             raise SystemExit(f"suite position not winning per TB: {name} wdl={wdl}")
@@ -72,8 +74,11 @@ def main() -> None:
     parser.add_argument("--skill", type=int, default=9)
     parser.add_argument("--base-time", type=int, default=12000)
     parser.add_argument("--inc", type=int, default=50)
+    parser.add_argument("--games-per-side", type=int, default=1)
     parser.add_argument("--no-tb", action="store_true")
     args = parser.parse_args()
+    if args.games_per_side < 1:
+        parser.error("--games-per-side must be positive")
 
     fens, names = build_fens()
     verify_tb_wins(fens, names)
@@ -82,21 +87,26 @@ def main() -> None:
         initial_skill=args.skill,
         base_time_ms=args.base_time,
         inc_ms=args.inc,
+        require_positive_root_gap=True,
         use_tb=not args.no_tb,
     )
     stats = EvalStats()
-    for game_id, (name, fen) in enumerate(zip(names, fens, strict=True), 1):
-        bot_color = chess.WHITE if chess.Board(fen).turn == chess.WHITE else chess.BLACK
-        res = evaluator._play_game(game_id, bot_color, fen)
-        stats.add_result(res)
-        outcome = (
-            "win" if res.bot_score == 1.0 else "draw" if res.bot_score == 0.5 else "loss"
-        )
-        print(
-            f"[{name}] Bot: {outcome} | {res.result} ({res.termination_reason}) "
-            f"| moves: {res.total_moves} | max_ms: {res.bot_max_move_time_ms:.0f} "
-            f"| viol: {res.time_violations}"
-        )
+    game_id = 0
+    for repetition in range(1, args.games_per_side + 1):
+        for name, fen in zip(names, fens, strict=True):
+            game_id += 1
+            bot_color = chess.WHITE if chess.Board(fen).turn == chess.WHITE else chess.BLACK
+            res = evaluator._play_game(game_id, bot_color, fen)
+            stats.add_result(res)
+            outcome = (
+                "win" if res.bot_score == 1.0 else "draw" if res.bot_score == 0.5 else "loss"
+            )
+            suffix = f"#{repetition}" if args.games_per_side > 1 else ""
+            print(
+                f"[{name}{suffix}] Bot: {outcome} | {res.result} "
+                f"({res.termination_reason}) | moves: {res.total_moves} "
+                f"| max_ms: {res.bot_max_move_time_ms:.0f} | viol: {res.time_violations}"
+            )
     print("=" * 65)
     print(
         f"ENDGAME SUITE: +{stats.wins} ={stats.draws} -{stats.losses} "

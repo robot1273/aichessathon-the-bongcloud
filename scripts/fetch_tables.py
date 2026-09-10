@@ -37,10 +37,17 @@ EXPECTED_COUNT = (len(TABLES_3MAN) + len(TABLES_4MAN)) * 2
 
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = dest.with_suffix(dest.suffix + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "aichessathon-starter-fetch/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as fh:
-        while chunk := resp.read(1 << 20):
-            fh.write(chunk)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp, temporary.open("wb") as fh:
+            while chunk := resp.read(1 << 20):
+                fh.write(chunk)
+        if temporary.stat().st_size == 0:
+            raise OSError(f"empty download: {url}")
+        temporary.replace(dest)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def fetch_tables() -> None:
@@ -48,7 +55,11 @@ def fetch_tables() -> None:
     for base in TABLES_3MAN + TABLES_4MAN:
         names += [f"{base}.rtbw", f"{base}.rtbz"]
     assert len(names) == EXPECTED_COUNT, f"{len(names)} != {EXPECTED_COUNT}"
-    missing = [n for n in names if not (TB_DIR / n).is_file()]
+    missing = [
+        name
+        for name in names
+        if not (TB_DIR / name).is_file() or (TB_DIR / name).stat().st_size == 0
+    ]
     if not missing:
         print(f"tb/: all {len(names)} files present, skipping download")
         return
@@ -56,7 +67,7 @@ def fetch_tables() -> None:
     for i, name in enumerate(missing, 1):
         print(f"  [{i}/{len(missing)}] {name}")
         _download(f"{HF_BASE}/{name}", TB_DIR / name)
-    total = sum(p.stat().st_size for p in TB_DIR.glob("*.rtb*"))
+    total = sum((TB_DIR / name).stat().st_size for name in names)
     print(f"tb/: {len(names)} files, {total:,} bytes total")
 
 
