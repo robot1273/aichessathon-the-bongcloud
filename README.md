@@ -16,7 +16,7 @@ When you like it, `make zip` and drop `submission.zip` on your dashboard.
 
 ## Writing an agent
 
-`agent.py` is the whole submission. One function:
+`agent.py` is the whole submission. One function.
 
 ```python
 def get_move(fen: str, time_left_ms: int) -> str:
@@ -34,14 +34,13 @@ uv run python -m harness.arena --opponent ../my-old-version --games 200
 uv run python -m harness.arena --pgn-dir games
 ```
 
-Anything your agent prints shows up under the result, so `print` debugging works. The platform
-keeps the first 4 KB and the last 4 KB, and so does the harness. Every rated game leaves a log on
-your dashboard beside the PGN with your output, your init time, your move times and your clock.
-Only your team can read it.
-
-Games replay. The opening and the baseline's seed both come from the game number, so a
-deterministic agent plays the same games every run and a score change is a change you made. The
-random mover it ships with is not, so `make arena` wanders until you replace it.
+- Anything your agent prints shows up under the result, so `print` debugging works. The platform
+  keeps the first 4 KB and the last 4 KB, and so does the harness.
+- Every rated game leaves a log on your dashboard beside the PGN with your output, your init time,
+  your move times and your clock. Only your team can read it.
+- Games replay. The opening and the baseline's seed both come from the game number, so a
+  deterministic agent plays the same games every run and a score change is a change you made. The
+  random mover it ships with is not deterministic, so `make arena` wanders until you replace it.
 
 ## The ladder
 
@@ -54,8 +53,8 @@ evaluation worth searching with.
 | greedy vs minimax | 16 | 120 s + 0.5 s | 0.0% (+0 =0 -16) |
 | numba vs minimax | 16 | 10 s + 0.5 s | 59.4% +- 16.1% (+5 =9 -2) |
 
-Read the third row twice. 59.4% looks like an edge, but the interval runs from -47 to +195 elo,
-so sixteen games have not found one. That is why `make arena` prints it.
+Read the third row twice. 59.4% looks like an edge, but the interval runs from -47 to +195 elo, so
+sixteen games have not found one. That is why `make arena` prints it.
 
 ```
 uv run python -m harness.arena --agent baselines/random --opponent baselines/greedy --games 32
@@ -69,9 +68,9 @@ uv run python -m harness.arena --agent baselines/numba --opponent baselines/mini
   the seed the baselines take from the harness.
 - `baselines/greedy` searches one ply on material.
 - `baselines/minimax` searches two plies on material and mobility, with no time management.
-- `baselines/numba` is `minimax` with the evaluation jitted. It is barely stronger, which is
-  the point: jitting a shallow search buys headroom, not depth. Read it for the warm-up call
-  at the bottom, which is how you keep compilation off your clock.
+- `baselines/numba` is `minimax` with the evaluation jitted. It is barely stronger, which is the
+  point. Jitting a shallow search buys headroom, not depth. Read it for the warm-up call at the
+  bottom, which is how you keep compilation off your clock.
 
 ## What's here
 
@@ -88,15 +87,13 @@ harness/package.py   builds submission.zip and plays the platform's two smoke ga
 docs/IDEAS.md        where the strength actually comes from
 ```
 
-`make zip` ships `agent.py`, every python file beside it, `weights/`, and any package you import.
-Add the rest with `--include`. It then plays two smoke games out of the zip it just built, so a
-file you never packaged fails here instead of on the platform.
-
-Local games start from one of the eight openings unless you pass `--fen`. Rated games draw from
-the full set, which is not published. Treat the eight as a sample, not preparation.
-
-The platform decides acceptance and its validation log is the authority. The smoke games are
-here so a broken zip costs a minute, not one of your ten daily uploads.
+- `make zip` ships `agent.py`, every python file beside it, `weights/`, and any package you
+  import. Add the rest with `--include`.
+- It then plays the platform's two smoke games out of the zip it just built, so a file you never
+  packaged fails here in a minute instead of costing one of your ten daily uploads.
+- The platform decides acceptance and its validation log is the authority.
+- Local games start from one of the eight openings unless you pass `--fen`. Rated games draw from
+  the full set, which is not published. Treat the eight as a sample, not preparation.
 
 ## The rules
 
