@@ -10,23 +10,35 @@ from src.board import Board, move_to_uci
 from src.board import make_move as encode_move
 from src.constants import HASH, INF, MAX_PLY, STATE_SIZE
 from src.evaluation import evaluate_with_phase
+from src.move_ordering import pick_fallback_move
 from src.search import STATS_SIZE, Bot, is_root_ambiguous
 from src.search_numba import alpha_beta, board_to_state, is_draw, quiescence
 from src.time_manager import DEFAULT_TIME_CONFIG
 from src.tt import create_tt_arrays, probe_tt
 from src.zobrist import calculate_hash, has_legal_en_passant
 
-KIWIPETE = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
-
 
 class SearchTests(unittest.TestCase):
+    def test_fallback_prefers_queen_promotion_or_valid_tt_move(self) -> None:
+        board = Board.from_fen("k7/4P3/8/8/8/8/8/K7 w - - 0 1")
+        moves = board.generate_moves()
+
+        self.assertEqual(move_to_uci(pick_fallback_move(board, moves)), "e7e8q")
+
+        knight_promotion = next(move for move in moves if move_to_uci(move) == "e7e8n")
+        self.assertEqual(pick_fallback_move(board, moves, knight_promotion), knight_promotion)
+
     def test_forced_move_resets_public_state(self) -> None:
-        bot = Bot()
+        bot = Bot(collect_stats=True)
+        bot.get_best_move(Board.from_fen(), time_left_ms=100_000, depth=1)
         board = Board.from_fen("7k/8/8/8/8/8/8/K5Q1 b - - 0 1")
 
         move = bot.get_best_move(board, time_left_ms=100_000, depth=2)
 
         self.assertEqual(move_to_uci(move), "h8h7")
+        self.assertEqual(bot.completed_depth, 1)
+        self.assertEqual(bot.nodes, 1)
+        self.assertIsNone(bot.search_stats)
 
     def test_repetition_requires_three_occurrences(self) -> None:
         board = Board.from_fen()

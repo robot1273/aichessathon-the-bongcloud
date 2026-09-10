@@ -20,6 +20,26 @@ from src.attacks import (
     queen_attacks,
     rook_attacks,
 )
+from src.constants import (
+    BISHOP,
+    BLACK,
+    CAPTURE,
+    CASTLING_RIGHTS_MASK,
+    DOUBLE_PAWN_PUSH,
+    EN_PASSANT,
+    KING,
+    KING_CASTLE,
+    KNIGHT,
+    KNIGHT_PROMO,
+    PAWN,
+    PROMOTION_CAPTURE_PIECES,
+    PROMOTION_PIECES,
+    QUEEN,
+    QUEEN_CASTLE,
+    QUIET,
+    ROOK,
+    WHITE,
+)
 from src.evaluation import (
     ADJACENT_FILE_MASKS,
     EG_TABLE,
@@ -45,20 +65,6 @@ from src.zobrist import (
     has_legal_en_passant,
 )
 
-# ---------------------------------------------------------------------------
-# Constants: Pieces and Colours
-# ---------------------------------------------------------------------------
-
-PAWN: Final[int] = 0
-KNIGHT: Final[int] = 1
-BISHOP: Final[int] = 2
-ROOK: Final[int] = 3
-QUEEN: Final[int] = 4
-KING: Final[int] = 5
-
-WHITE: Final[int] = 0
-BLACK: Final[int] = 1
-
 _REL_RANK: Final[tuple[tuple[int, ...], ...]] = tuple(
     tuple(sq >> 3 if c == WHITE else 7 - (sq >> 3) for sq in range(64)) for c in range(2)
 )
@@ -71,41 +77,6 @@ _PASSED_EG: Final[tuple[tuple[int, ...], ...]] = tuple(
 _SQ_FILE: Final[tuple[int, ...]] = tuple(sq & 7 for sq in range(64))
 _SQ_FILE_MASK: Final[tuple[int, ...]] = tuple(int(FILE_MASKS[sq & 7]) for sq in range(64))
 
-# ---------------------------------------------------------------------------
-# Move Flags (16-bit encoding matching stargaze)
-# bits 0-5: from_square
-# bits 6-11: to_square
-# bits 12-15: flags
-# ---------------------------------------------------------------------------
-
-QUIET: Final[int] = 0b0000
-DOUBLE_PAWN_PUSH: Final[int] = 0b0001
-KING_CASTLE: Final[int] = 0b0010
-QUEEN_CASTLE: Final[int] = 0b0011
-CAPTURE: Final[int] = 0b0100
-EN_PASSANT: Final[int] = 0b0101
-KNIGHT_PROMO: Final[int] = 0b1000
-BISHOP_PROMO: Final[int] = 0b1001
-ROOK_PROMO: Final[int] = 0b1010
-QUEEN_PROMO: Final[int] = 0b1011
-KNIGHT_PROMO_CAPTURE: Final[int] = 0b1100
-BISHOP_PROMO_CAPTURE: Final[int] = 0b1101
-ROOK_PROMO_CAPTURE: Final[int] = 0b1110
-QUEEN_PROMO_CAPTURE: Final[int] = 0b1111
-
-PROMOTION_PIECES: Final[tuple[int, ...]] = (
-    KNIGHT_PROMO,
-    BISHOP_PROMO,
-    ROOK_PROMO,
-    QUEEN_PROMO,
-)
-PROMOTION_CAPTURE_PIECES: Final[tuple[int, ...]] = (
-    KNIGHT_PROMO_CAPTURE,
-    BISHOP_PROMO_CAPTURE,
-    ROOK_PROMO_CAPTURE,
-    QUEEN_PROMO_CAPTURE,
-)
-
 SQUARE_NAMES: Final[tuple[str, ...]] = tuple(
     f"{chr(ord('a') + (sq & 7))}{1 + (sq >> 3)}" for sq in range(64)
 )
@@ -117,28 +88,27 @@ PROMO_CHARS: Final[dict[int, str]] = {
     ROOK: "r",
     QUEEN: "q",
 }
-CHAR_TO_PROMO_PIECE: Final[dict[str, int]] = {
-    "n": KNIGHT,
-    "b": BISHOP,
-    "r": ROOK,
-    "q": QUEEN,
+_CHAR_TO_PIECE: Final[dict[str, tuple[int, int]]] = {
+    "p": (PAWN, BLACK),
+    "n": (KNIGHT, BLACK),
+    "b": (BISHOP, BLACK),
+    "r": (ROOK, BLACK),
+    "q": (QUEEN, BLACK),
+    "k": (KING, BLACK),
+    "P": (PAWN, WHITE),
+    "N": (KNIGHT, WHITE),
+    "B": (BISHOP, WHITE),
+    "R": (ROOK, WHITE),
+    "Q": (QUEEN, WHITE),
+    "K": (KING, WHITE),
+}
+_PIECE_TO_CHAR: Final[dict[tuple[int, int], str]] = {
+    piece: char for char, piece in _CHAR_TO_PIECE.items()
 }
 
 
 def make_move(from_sq: int, to_sq: int, flags: int = QUIET) -> int:
     return from_sq | (to_sq << 6) | (flags << 12)
-
-
-def move_from(m: int) -> int:
-    return m & 0x3F
-
-
-def move_to(m: int) -> int:
-    return (m >> 6) & 0x3F
-
-
-def move_flags(m: int) -> int:
-    return (m >> 12) & 0xF
 
 
 def move_is_capture(m: int) -> bool:
@@ -147,10 +117,6 @@ def move_is_capture(m: int) -> bool:
 
 def move_is_promo(m: int) -> bool:
     return bool(m & 0x8000)
-
-
-def move_is_quiet(m: int) -> bool:
-    return (m >> 12) & 0xC == 0
 
 
 def move_promo_piece(m: int) -> int:
@@ -164,17 +130,6 @@ def move_to_uci(m: int) -> str:
     if move_is_promo(m):
         s += PROMO_CHARS[move_promo_piece(m)]
     return s
-
-
-# Castling rights update masks indexed by square
-_CASTLING_RIGHTS_MASK: list[int] = [15] * 64
-_CASTLING_RIGHTS_MASK[0] = 13  # A1 rook moved / captured: clears WQ (bit 1)
-_CASTLING_RIGHTS_MASK[7] = 14  # H1 rook moved / captured: clears WK (bit 0)
-_CASTLING_RIGHTS_MASK[4] = 12  # E1 king moved: clears WK and WQ (bits 0, 1)
-_CASTLING_RIGHTS_MASK[56] = 7  # A8 rook moved / captured: clears BQ (bit 3)
-_CASTLING_RIGHTS_MASK[63] = 11  # H8 rook moved / captured: clears BK (bit 2)
-_CASTLING_RIGHTS_MASK[60] = 3  # E8 king moved: clears BK and BQ (bits 2, 3)
-CASTLING_RIGHTS_MASK: Final[tuple[int, ...]] = tuple(_CASTLING_RIGHTS_MASK)
 
 
 class Board:
@@ -255,21 +210,6 @@ class Board:
         halfmove_part = tokens[4] if len(tokens) > 4 else "0"
         fullmove_part = tokens[5] if len(tokens) > 5 else "1"
 
-        piece_map = {
-            "p": (PAWN, BLACK),
-            "n": (KNIGHT, BLACK),
-            "b": (BISHOP, BLACK),
-            "r": (ROOK, BLACK),
-            "q": (QUEEN, BLACK),
-            "k": (KING, BLACK),
-            "P": (PAWN, WHITE),
-            "N": (KNIGHT, WHITE),
-            "B": (BISHOP, WHITE),
-            "R": (ROOK, WHITE),
-            "Q": (QUEEN, WHITE),
-            "K": (KING, WHITE),
-        }
-
         rank = 7
         file = 0
         for char in board_part:
@@ -279,7 +219,7 @@ class Board:
             elif char.isdigit():
                 file += int(char)
             else:
-                piece, color = piece_map[char]
+                piece, color = _CHAR_TO_PIECE[char]
                 sq = rank * 8 + file
                 board._add_piece(sq, piece, color)
                 file += 1
@@ -338,14 +278,6 @@ class Board:
     # -----------------------------------------------------------------------
     # Piece Placement & Mutation
     # -----------------------------------------------------------------------
-
-    def piece_type_at(self, sq: int) -> int | None:
-        pt = self.piece_at_sq[sq]
-        return pt if pt >= 0 else None
-
-    def color_at(self, sq: int) -> int | None:
-        c = self.colour_at_sq[sq]
-        return c if c >= 0 else None
 
     def _add_piece(self, sq: int, piece: int, color: int) -> None:
         sq = int(sq)
@@ -678,67 +610,6 @@ class Board:
         self.eg_bonus[1] = b_eg1
         self.game_phase = saved_phase
         self.hash = saved_hash
-
-    def make_null_move(self) -> None:
-        us = WHITE if self.turn else BLACK
-        # Save undo state
-        self._stack.append(
-            (
-                0,
-                -1,
-                -1,
-                self.castling,
-                self.ep_square,
-                self.halfmove,
-                self.hash,
-                self.mg_score[0],
-                self.mg_score[1],
-                self.eg_score[0],
-                self.eg_score[1],
-                self.game_phase,
-                self.mg_bonus[0],
-                self.mg_bonus[1],
-                self.eg_bonus[0],
-                self.eg_bonus[1],
-            )
-        )
-
-        if self.ep_square != -1:
-            if has_legal_en_passant(self):
-                self.hash ^= EP_KEYS[self.ep_square & 7]
-            self.ep_square = -1
-
-        self.halfmove += 1
-        self.turn = not self.turn
-        self.hash ^= TURN_KEY
-        if us == BLACK:
-            self.fullmove += 1
-        self.history.append(self.hash)
-
-    def unmake_null_move(self) -> None:
-        (
-            _,
-            _,
-            _,
-            self.castling,
-            self.ep_square,
-            self.halfmove,
-            self.hash,
-            self.mg_score[0],
-            self.mg_score[1],
-            self.eg_score[0],
-            self.eg_score[1],
-            self.game_phase,
-            self.mg_bonus[0],
-            self.mg_bonus[1],
-            self.eg_bonus[0],
-            self.eg_bonus[1],
-        ) = self._stack.pop()
-
-        self.history.pop()
-        self.turn = not self.turn
-        if not self.turn:
-            self.fullmove -= 1
 
     # -----------------------------------------------------------------------
     # Move Generation (Legal-only, Stargaze port)
@@ -1285,28 +1156,9 @@ class Board:
         dark_squares = 0xAA55AA55AA55AA55
         return not (bishops & light_squares) or not (bishops & dark_squares)
 
-    def is_game_over(self) -> bool:
-        if not self.generate_moves():
-            return True
-        return self.is_halfmove_draw() or self.is_insufficient_material() or self.is_repetition(3)
-
     def fen(self) -> str:
         """Export current position as standard FEN string."""
         parts = []
-        piece_chars = {
-            (PAWN, WHITE): "P",
-            (KNIGHT, WHITE): "N",
-            (BISHOP, WHITE): "B",
-            (ROOK, WHITE): "R",
-            (QUEEN, WHITE): "Q",
-            (KING, WHITE): "K",
-            (PAWN, BLACK): "p",
-            (KNIGHT, BLACK): "n",
-            (BISHOP, BLACK): "b",
-            (ROOK, BLACK): "r",
-            (QUEEN, BLACK): "q",
-            (KING, BLACK): "k",
-        }
         for rank in range(7, -1, -1):
             empty = 0
             row = ""
@@ -1319,7 +1171,7 @@ class Board:
                     if empty > 0:
                         row += str(empty)
                         empty = 0
-                    row += piece_chars[(pt, self.colour_at_sq[sq])]
+                    row += _PIECE_TO_CHAR[(pt, self.colour_at_sq[sq])]
             if empty > 0:
                 row += str(empty)
             parts.append(row)

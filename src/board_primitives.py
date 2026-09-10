@@ -81,18 +81,6 @@ def lsb_sq(bb: int | np.uint64) -> int:
 
 
 @njit(cache=False)
-def _bit_length(n: int) -> int:
-    """Fast bit length for uint64."""
-    if n == 0:
-        return 0
-    res = 0
-    while n > 0:
-        res += 1
-        n >>= 1
-    return res
-
-
-@njit(cache=False)
 def _add_piece(state: np.ndarray, sq: int, piece: int, color: int) -> None:
     sq_bb = np.uint64(1) << np.uint64(sq)
     state[piece] |= sq_bb
@@ -122,16 +110,6 @@ def piece_type_at(state: np.ndarray, sq: int) -> int:
     for p in range(6):
         if state[p] & sq_bb:
             return p
-    return -1
-
-
-@njit(cache=False)
-def color_at(state: np.ndarray, sq: int) -> int:
-    sq_bb = np.uint64(1) << np.uint64(sq)
-    if state[C_WHITE] & sq_bb:
-        return WHITE
-    if state[C_BLACK] & sq_bb:
-        return BLACK
     return -1
 
 

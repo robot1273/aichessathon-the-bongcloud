@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
 
 from src.board import Board, move_to_uci
 from src.constants import MATE_SCORE, MATE_THRESHOLD
-from src.search import Bot, SearchStats
+from src.search import Bot, SearchInfo, SearchStats
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,7 +13,6 @@ class BenchmarkResult:
     index: int
     name: str
     depth: int
-    sel_depth: int
     score: int
     move: int
     nodes: int
@@ -49,13 +47,13 @@ def run_benchmark(
         print(f"FEN: {fen}")
         print("-" * 86)
 
-        def show_iteration(info: dict[str, Any]) -> None:
+        def show_iteration(info: SearchInfo) -> None:
             if quiet:
                 return
             move = info["pv"]
             assert isinstance(move, int)
             print(
-                f"  depth {info['depth']:>2}/{info['sel_depth']:<2} "
+                f"  depth {info['depth']:>2} "
                 f"| score {info['score_str']:>9} "
                 f"| nodes {info['nodes']:>10,} "
                 f"| nps {info['nps']:>10,} "
@@ -77,7 +75,6 @@ def run_benchmark(
             index=index,
             name=name,
             depth=bot.completed_depth,
-            sel_depth=bot.sel_depth,
             score=bot.best_score,
             move=move,
             nodes=bot.nodes,
@@ -86,7 +83,7 @@ def run_benchmark(
         )
         results.append(result)
         print(
-            f"=> Result: Depth {result.depth}/{result.sel_depth} "
+            f"=> Result: Depth {result.depth} "
             f"| Score: {format_score(result.score)} "
             f"| Move: {move_to_uci(result.move)} "
             f"| Nodes: {result.nodes:,} "
@@ -108,7 +105,7 @@ def print_stats(stats: SearchStats) -> None:
         f"| beta {stats.beta_cutoffs:,} "
         f"| prunes rfp {stats.rfp_prunes:,}, null {stats.null_prunes:,} "
         f"futility {stats.futility_prunes:,} "
-        f"| LMR {stats.lmr_reductions:,} | movegen {stats.move_generations:,}"
+        f"| LMR {stats.lmr_reductions:,}"
     )
 
 

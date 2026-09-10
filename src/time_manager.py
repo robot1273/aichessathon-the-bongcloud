@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -86,7 +85,8 @@ class TimeManager:
     def start(
         self,
         time_left_ms: int,
-        board: Any,
+        move_number: int,
+        phase: float,
         movetime_ms: int | None = None,
         started_at: float | None = None,
     ) -> None:
@@ -109,15 +109,7 @@ class TimeManager:
         usable = max(time_left_ms / 1000.0 - self.config.safety_s, 0.01)
         self._usable = usable
 
-        if hasattr(board, "game_phase"):
-            phase = min(board.game_phase, 5560) / 5560.0
-        else:
-            from .evaluation import evaluate_with_phase
-
-            _, phase = evaluate_with_phase(board)
-
-        move_number = getattr(board, "fullmove", getattr(board, "fullmove_number", 1))
-        base = self._base_time(usable, move_number, phase)
+        base = self._base_time(usable, move_number, min(max(phase, 0.0), 1.0))
 
         self._soft_limit = min(base, usable * self.config.soft_usable_cap)
         self._hard_limit = min(
@@ -274,10 +266,13 @@ class TimeManager:
             )
         pure_base = usable / expected_remaining
         dynamic_share = self.config.increment_share
-        # Dynamic increment factoring: as pure_base drops below increment_s, we rely more on the increment.
+        # Dynamic increment factoring: as pure_base drops below increment_s,
+        # we rely more on the increment.
         if self._increment_s > 0 and pure_base < self._increment_s:
-            dynamic_share = 1.0 - (1.0 - self.config.increment_share) * (pure_base / self._increment_s)
-        
+            dynamic_share = 1.0 - (1.0 - self.config.increment_share) * (
+                pure_base / self._increment_s
+            )
+
         base = pure_base + self._increment_s * dynamic_share
         if self.config.opening_first_move <= move_number <= self.config.opening_last_move:
             base *= self.config.opening_boost

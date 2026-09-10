@@ -43,8 +43,13 @@ INF: Final[int] = 2_000_000
 MATE_SCORE: Final[int] = 1_000_000
 MATE_THRESHOLD: Final[int] = 900_000
 NO_MOVE: Final[int] = 0
-PROMOTION_PIECES = (QUEEN_PROMO, KNIGHT_PROMO, ROOK_PROMO, BISHOP_PROMO)
-PROMOTION_CAPTURE_PIECES = (
+PROMOTION_PIECES: Final[tuple[int, ...]] = (
+    QUEEN_PROMO,
+    KNIGHT_PROMO,
+    ROOK_PROMO,
+    BISHOP_PROMO,
+)
+PROMOTION_CAPTURE_PIECES: Final[tuple[int, ...]] = (
     QUEEN_PROMO_CAPTURE,
     KNIGHT_PROMO_CAPTURE,
     ROOK_PROMO_CAPTURE,
@@ -101,12 +106,13 @@ CASTLE_WQ: Final[int] = 2
 CASTLE_BK: Final[int] = 4
 CASTLE_BQ: Final[int] = 8
 
-_CASTLING_RIGHTS_MASK: list[int] = [15] * 64
-_CASTLING_RIGHTS_MASK[0] = 13
-_CASTLING_RIGHTS_MASK[7] = 14
-_CASTLING_RIGHTS_MASK[4] = 12
-_CASTLING_RIGHTS_MASK[56] = 7
-_CASTLING_RIGHTS_MASK[63] = 11
-_CASTLING_RIGHTS_MASK[60] = 3
+_castling_rights_mask = [15] * 64
+_castling_rights_mask[0] = 13
+_castling_rights_mask[7] = 14
+_castling_rights_mask[4] = 12
+_castling_rights_mask[56] = 7
+_castling_rights_mask[63] = 11
+_castling_rights_mask[60] = 3
 
-NB_CASTLING_RIGHTS_MASK = np.array(_CASTLING_RIGHTS_MASK, dtype=np.uint8)
+CASTLING_RIGHTS_MASK: Final[tuple[int, ...]] = tuple(_castling_rights_mask)
+NB_CASTLING_RIGHTS_MASK = np.array(CASTLING_RIGHTS_MASK, dtype=np.uint8)

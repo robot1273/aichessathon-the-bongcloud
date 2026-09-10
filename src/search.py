@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import ctypes
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict
 
 import numpy as np
 
 from src.board import Board, move_to_uci
 from src.constants import INF, MATE_SCORE, MATE_THRESHOLD, MAX_PLY, NO_MOVE, STATE_SIZE
-from src.move_ordering import order_moves
+from src.evaluation import GAMEPHASE_SUM
+from src.move_ordering import pick_fallback_move
 from src.search_numba import (
     board_to_state,
     search_root,
@@ -42,11 +44,10 @@ STATS_LMR = 12
 STATS_SIZE = 13
 
 
-@dataclass
+@dataclass(slots=True)
 class SearchStats:
     nodes: int = 0
     qnodes: int = 0
-    move_generations: int = 0
     tt_probes: int = 0
     tt_hits: int = 0
     tt_cutoffs: int = 0
@@ -60,7 +61,19 @@ class SearchStats:
 INCREMENT_S = 0.5
 
 
-@dataclass(frozen=True)
+class SearchInfo(TypedDict):
+    depth: int
+    score: int
+    score_str: str
+    nodes: int
+    nps: int
+    time: float
+    time_ms: int
+    pv: int
+    root_score_gap: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class MoveTiming:
     clock_before_s: float
     soft_limit_s: float
@@ -108,9 +121,7 @@ class Bot:
         trace_timing: bool = False,
         use_tb: bool = True,
     ) -> None:
-        self.tt_exp_size = tt_exp_size
         self.collect_stats = collect_stats
-        self.increment_s = increment_s
         self.time_config = time_config
         self.trace_timing = trace_timing
         self.use_tb = use_tb
@@ -127,7 +138,6 @@ class Bot:
         self.stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         self.completed_depth = 0
-        self.sel_depth = 0
         self.best_score = 0
         self.nodes = 0
         self.best_move = NO_MOVE
@@ -136,7 +146,6 @@ class Bot:
         self.search_stats: SearchStats | None = None
         self.last_timing: MoveTiming | None = None
         self._game_hashes: list[int] = []
-        self._pending_position: Board | None = None
 
         if self.use_tb:
             initialize_tablebase()
@@ -189,36 +198,22 @@ class Bot:
         depth: int | None = None,
         movetime_ms: int | None = None,
         verbose: bool = False,
-        callback: Any | None = None,
+        callback: Callable[[SearchInfo], None] | None = None,
         started_at: float | None = None,
     ) -> int:
         self.current_age += 1
         # Include all per-move Python work in the budget enforced by the runner.
-        self.time_mgr.start(time_left_ms, board, movetime_ms, started_at)
+        phase = min(board.game_phase, GAMEPHASE_SUM) / GAMEPHASE_SUM
+        self.time_mgr.start(time_left_ms, board.fullmove, phase, movetime_ms, started_at)
         self._record_position(board)
 
         # Check for immediate return on forced moves or no moves
         legal_moves = board.generate_moves()
         if not legal_moves:
-            self.best_move = NO_MOVE
-            self.nodes = 0
-            self.completed_depth = 0
-            self.best_score = 0
-            self.runner_up_score = -INF
-            self.root_score_gap = None
-            self._record_timing(0, None, 0.0, False, False, False, None, "no-legal-move")
-            return NO_MOVE
+            return self._finish_without_search(board, NO_MOVE, 0, 0, "no-legal-move")
 
         if len(legal_moves) == 1:
-            self.best_move = legal_moves[0]
-            self.nodes = 1
-            self.completed_depth = 1
-            self.best_score = 0
-            self.runner_up_score = -INF
-            self.root_score_gap = None
-            self._record_selected_move(board, legal_moves[0])
-            self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
-            return legal_moves[0]
+            return self._finish_without_search(board, legal_moves[0], 1, 1, "forced-move")
 
         # Prepare an exact root policy before search. Fixed-depth callers are
         # benchmarks/tests of the search itself; the platform never sets depth.
@@ -226,40 +221,24 @@ class Bot:
         if depth is None and self.use_tb:
             tb_root = tb_probe_root(board, legal_moves, self._game_hashes)
             if tb_root is not None and tb_root.wdl == -2:
-                self.best_move = tb_root.fallback_move
-                self.nodes = 1
-                self.completed_depth = 1
-                self.best_score = 0
-                self.runner_up_score = -INF
-                self.root_score_gap = None
-                self._record_selected_move(board, tb_root.fallback_move)
-                self._record_timing(
-                    1, None, 0.0, False, False, False, None, "tablebase"
+                return self._finish_without_search(
+                    board, tb_root.fallback_move, 1, 1, "tablebase"
                 )
-                return tb_root.fallback_move
 
         default_move = legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
-            self.best_move = default_move
-            self.nodes = 0
-            self.completed_depth = 0
-            self.best_score = 0
-            self.runner_up_score = -INF
-            self.root_score_gap = None
-            self._record_selected_move(board, default_move)
-            self._record_timing(0, None, 0.0, False, False, False, None, "request-deadline")
-            return default_move
+            return self._finish_without_search(board, default_move, 0, 0, "request-deadline")
 
         # Prioritize known TT move or best-ordered move for safe emergency fallback.
         found, tt_move_val, _, _, _, _ = probe_tt(
             np.uint64(board.hash),
             *self.tt_arrays,
         )
-        if found and tt_move_val in legal_moves:
-            default_move = tt_move_val
-        else:
-            ordered = order_moves(board, legal_moves, tt_move=tt_move_val if found else 0)
-            default_move = ordered[0]
+        default_move = pick_fallback_move(
+            board,
+            legal_moves,
+            tt_move=tt_move_val if found else NO_MOVE,
+        )
 
         state = board_to_state(board)
         start_t = self.time_mgr.elapsed()
@@ -284,11 +263,9 @@ class Bot:
                 max(self.time_mgr.hard_limit - self.time_mgr.elapsed(), 0.0) * 1_000_000
             )
 
-        self.stats[0] = 0  # nodes
-        self.stats[1] = 0  # aborted flag
-        self.stats[2] = clock()
-        self.stats[3] = deadline_ticks
-        self.stats[4:] = 0  # telemetry counters (S7); nodes/abort above
+        self.stats.fill(0)
+        self.stats[STATS_T0] = clock()
+        self.stats[STATS_DEADLINE] = deadline_ticks
 
         # Clear killer heuristics per search; age history
         self.killers.fill(0)
@@ -367,8 +344,7 @@ class Bot:
             iteration_start = self.time_mgr.elapsed()
             aspiration_failed = False
             use_aspiration = (
-                d >= self.time_config.aspiration_min_depth
-                and abs(best_score) < MATE_THRESHOLD
+                d >= self.time_config.aspiration_min_depth and abs(best_score) < MATE_THRESHOLD
             )
             if use_aspiration and (self.time_mgr.is_low_clock() or not predicted_time):
                 use_aspiration = False
@@ -388,21 +364,8 @@ class Bot:
                 delta = self.time_config.aspiration_delta
                 alpha = max(-INF, best_score - delta)
                 beta = min(INF, best_score + delta)
-                score, move, runner_up_score, aborted = search_root(
-                    state,
-                    self.undo_stack,
-                    self.moves_stack,
-                    self.scores_stack,
-                    alpha,
-                    beta,
-                    d,
-                    self.killers,
-                    self.history,
-                    self.stats,
-                    hash_history,
-                    hist_len,
-                    self.current_age,
-                    *self.tt_arrays,
+                score, move, runner_up_score, aborted = self._search_root(
+                    state, hash_history, hist_len, alpha, beta, d
                 )
 
                 if not aborted and score <= alpha:
@@ -415,21 +378,8 @@ class Bot:
                     ):
                         aborted = True
                     else:
-                        score, move, runner_up_score, aborted = search_root(
-                            state,
-                            self.undo_stack,
-                            self.moves_stack,
-                            self.scores_stack,
-                            -INF,
-                            beta,
-                            d,
-                            self.killers,
-                            self.history,
-                            self.stats,
-                            hash_history,
-                            hist_len,
-                            self.current_age,
-                            *self.tt_arrays,
+                        score, move, runner_up_score, aborted = self._search_root(
+                            state, hash_history, hist_len, -INF, beta, d
                         )
                 elif not aborted and score >= beta:
                     # Fail high: widen window to INF
@@ -441,38 +391,12 @@ class Bot:
                     ):
                         aborted = True
                     else:
-                        score, move, runner_up_score, aborted = search_root(
-                            state,
-                            self.undo_stack,
-                            self.moves_stack,
-                            self.scores_stack,
-                            alpha,
-                            INF,
-                            d,
-                            self.killers,
-                            self.history,
-                            self.stats,
-                            hash_history,
-                            hist_len,
-                            self.current_age,
-                            *self.tt_arrays,
+                        score, move, runner_up_score, aborted = self._search_root(
+                            state, hash_history, hist_len, alpha, INF, d
                         )
             else:
-                score, move, runner_up_score, aborted = search_root(
-                    state,
-                    self.undo_stack,
-                    self.moves_stack,
-                    self.scores_stack,
-                    -INF,
-                    INF,
-                    d,
-                    self.killers,
-                    self.history,
-                    self.stats,
-                    hash_history,
-                    hist_len,
-                    self.current_age,
-                    *self.tt_arrays,
+                score, move, runner_up_score, aborted = self._search_root(
+                    state, hash_history, hist_len, -INF, INF, d
                 )
 
             if aborted:
@@ -510,7 +434,7 @@ class Bot:
                 self.time_mgr.shorten_for_stable_win()
 
             if depth is None or movetime_ms is not None:
-                self.stats[3] = clock() + int(
+                self.stats[STATS_DEADLINE] = clock() + int(
                     max(self.time_mgr.hard_limit - self.time_mgr.elapsed(), 0.0) * 1_000_000
                 )
             prev_score = score
@@ -518,7 +442,7 @@ class Bot:
             last_aspiration_failed = aspiration_failed
             aspiration_failed_any = aspiration_failed_any or aspiration_failed
 
-            nodes = int(self.stats[0])
+            nodes = int(self.stats[STATS_NODES])
             elapsed = max(self.time_mgr.elapsed() - start_t, 0.0001)
             nps = int(nodes / elapsed)
 
@@ -529,9 +453,8 @@ class Bot:
                 else:
                     score_str = f"cp {best_score}"
 
-                info = {
+                info: SearchInfo = {
                     "depth": d,
-                    "sel_depth": d,
                     "score": best_score,
                     "score_str": score_str,
                     "nodes": nodes,
@@ -565,14 +488,12 @@ class Bot:
         self.runner_up_score = completed_runner_up_score
         self.root_score_gap = completed_root_score_gap
         self.completed_depth = completed_depth
-        self.sel_depth = completed_depth
-        self.nodes = int(self.stats[0])
+        self.nodes = int(self.stats[STATS_NODES])
         if self.collect_stats:
             st = self.stats
             self.search_stats = SearchStats(
                 nodes=int(st[STATS_NODES]),
                 qnodes=int(st[STATS_QNODES]),
-                move_generations=int(st[STATS_NODES]),
                 tt_probes=int(st[STATS_TT_PROBES]),
                 tt_hits=int(st[STATS_TT_HITS]),
                 tt_cutoffs=int(st[STATS_TT_CUTOFFS]),
@@ -597,6 +518,51 @@ class Bot:
         )
 
         return best_move
+
+    def _search_root(
+        self,
+        state: np.ndarray,
+        hash_history: np.ndarray,
+        hist_len: int,
+        alpha: int,
+        beta: int,
+        depth: int,
+    ) -> tuple[int, int, int, bool]:
+        return search_root(
+            state,
+            self.undo_stack,
+            self.moves_stack,
+            self.scores_stack,
+            alpha,
+            beta,
+            depth,
+            self.killers,
+            self.history,
+            self.stats,
+            hash_history,
+            hist_len,
+            self.current_age,
+            *self.tt_arrays,
+        )
+
+    def _finish_without_search(
+        self,
+        board: Board,
+        move: int,
+        nodes: int,
+        completed_depth: int,
+        stop_reason: str,
+    ) -> int:
+        self.best_move = move
+        self.best_score = 0
+        self.runner_up_score = -INF
+        self.root_score_gap = None
+        self.completed_depth = completed_depth
+        self.nodes = nodes
+        self.search_stats = None
+        self._record_selected_move(board, move)
+        self._record_timing(completed_depth, None, 0.0, False, False, False, None, stop_reason)
+        return move
 
     def _record_timing(
         self,
@@ -640,6 +606,6 @@ class Bot:
     def _record_selected_move(self, board: Board, move: int) -> None:
         if move == NO_MOVE:
             return
-        self._pending_position = board.copy()
-        self._pending_position.make_move(move)
-        self._game_hashes.append(self._pending_position.hash)
+        selected_position = board.copy()
+        selected_position.make_move(move)
+        self._game_hashes.append(selected_position.hash)

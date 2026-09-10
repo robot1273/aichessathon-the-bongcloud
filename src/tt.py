@@ -4,14 +4,12 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
+from src.constants import MATE_THRESHOLD, NO_MOVE
+
 BOUND_NONE = 0
 BOUND_EXACT = 1
 BOUND_LOWER = 2
 BOUND_UPPER = 3
-
-MATE_SCORE = 1_000_000
-MATE_THRESHOLD = 900_000
-NO_MOVE = 0
 
 
 @njit(cache=False)

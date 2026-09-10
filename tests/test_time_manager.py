@@ -9,10 +9,13 @@ class TimeManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.board = Board.from_fen()
 
+    def start_manager(self, manager: TimeManager, time_left_ms: int) -> None:
+        manager.start(time_left_ms, self.board.fullmove, 1.0)
+
     def test_config_controls_instability_threshold(self) -> None:
         config = replace(DEFAULT_TIME_CONFIG, instability_threshold=500)
         manager = TimeManager(increment_s=0.5, config=config)
-        manager.start(120_000, self.board)
+        self.start_manager(manager, 120_000)
         soft_limit = manager.soft_limit
         hard_limit = manager.hard_limit
 
@@ -23,7 +26,7 @@ class TimeManagerTests(unittest.TestCase):
 
     def test_initial_score_does_not_extend_budget(self) -> None:
         manager = TimeManager(increment_s=0.5)
-        manager.start(120_000, self.board)
+        self.start_manager(manager, 120_000)
         soft_limit = manager.soft_limit
         hard_limit = manager.hard_limit
 
@@ -34,7 +37,7 @@ class TimeManagerTests(unittest.TestCase):
 
     def test_instability_extension_does_not_compound(self) -> None:
         manager = TimeManager(increment_s=0.5)
-        manager.start(120_000, self.board)
+        self.start_manager(manager, 120_000)
         base_soft_limit = manager.soft_limit
         base_hard_limit = manager.hard_limit
 
@@ -50,7 +53,7 @@ class TimeManagerTests(unittest.TestCase):
 
     def test_stable_win_shortens_only_soft_budget(self) -> None:
         manager = TimeManager(increment_s=0.5)
-        manager.start(120_000, self.board)
+        self.start_manager(manager, 120_000)
         soft_limit = manager.soft_limit
         hard_limit = manager.hard_limit
 
@@ -61,7 +64,7 @@ class TimeManagerTests(unittest.TestCase):
 
     def test_root_uncertainty_extends_the_base_budget(self) -> None:
         manager = TimeManager(increment_s=0.5)
-        manager.start(120_000, self.board)
+        self.start_manager(manager, 120_000)
         soft_limit = manager.soft_limit
         hard_limit = manager.hard_limit
 
@@ -72,7 +75,7 @@ class TimeManagerTests(unittest.TestCase):
 
     def test_low_clock_disables_uncertainty_extension(self) -> None:
         manager = TimeManager(increment_s=0.5)
-        manager.start(10_000, self.board)
+        self.start_manager(manager, 10_000)
         soft_limit = manager.soft_limit
         hard_limit = manager.hard_limit
 
@@ -84,14 +87,14 @@ class TimeManagerTests(unittest.TestCase):
 
     def test_low_clock_threshold_scales_with_increment(self) -> None:
         manager = TimeManager(increment_s=0.05)
-        manager.start(2_000, self.board)
+        self.start_manager(manager, 2_500)
 
         self.assertFalse(manager.is_low_clock())
         self.assertFalse(manager.is_panic_clock())
 
     def test_panic_clock_caps_search_budget_below_increment(self) -> None:
         manager = TimeManager(increment_s=0.5)
-        manager.start(3_000, self.board)
+        self.start_manager(manager, 3_000)
 
         self.assertTrue(manager.is_panic_clock())
         self.assertLessEqual(manager.soft_limit, 0.325)
@@ -102,8 +105,8 @@ class TimeManagerTests(unittest.TestCase):
         later_move = Board.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 20")
         first_manager = TimeManager(increment_s=0.5)
         later_manager = TimeManager(increment_s=0.5)
-        first_manager.start(120_000, first_move)
-        later_manager.start(120_000, later_move)
+        first_manager.start(120_000, first_move.fullmove, 1.0)
+        later_manager.start(120_000, later_move.fullmove, 1.0)
 
         self.assertAlmostEqual(later_manager.soft_limit, first_manager.soft_limit * 1.20)
         self.assertAlmostEqual(later_manager.hard_limit, first_manager.hard_limit * 1.20)

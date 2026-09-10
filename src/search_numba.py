@@ -72,7 +72,6 @@ from src.move_ordering import MVV_LVA, PIECE_VALUES
 from src.tt import (
     BOUND_EXACT,
     BOUND_LOWER,
-    BOUND_NONE,
     BOUND_UPPER,
     probe_tt,
     score_from_tt,
@@ -182,9 +181,7 @@ def score_move(
 
 
 @njit(cache=False)
-def pick_move(
-    moves: np.ndarray, scores: np.ndarray, num_moves: int, current_index: int
-) -> None:
+def pick_move(moves: np.ndarray, scores: np.ndarray, num_moves: int, current_index: int) -> None:
     """Lazy Selection / Pick-Next-Best: select highest scoring move and swap into current_index."""
     max_idx = current_index
     max_score = scores[current_index]
@@ -759,7 +756,7 @@ def search_root(
         return 0, NO_MOVE, -INF, True
 
     hash_val = state[HASH]
-    found, tt_move_val, _, _, _, tt_static_val = probe_tt(
+    found, tt_move_val, _, _, _, _ = probe_tt(
         hash_val, tt_hash, tt_score, tt_move, tt_depth, tt_bound, tt_age, tt_static_eval
     )
     stats[5] += 1
@@ -792,6 +789,16 @@ def search_root(
         flags = (move >> 12) & 0xF
 
         is_tactical = bool(flags & CAPTURE or flags >= KNIGHT_PROMO)
+
+        may_check = (
+            depth >= 3
+            and legal_moves >= 3
+            and not is_tactical
+            and not in_check
+            and root_opp_king_sq >= 0
+            and may_give_check(state, from_sq, to_sq, flags, root_opp_king_sq, us)
+            and gives_check(state, move)
+        )
 
         make_move(state, undo_stack, 0, move)
         legal_moves += 1
@@ -836,12 +843,7 @@ def search_root(
                 elif h < -4000:
                     reduction += 1
                 # S2 gate (root): skip raycasts unless geometrically possible.
-                if (
-                    reduction > 0
-                    and root_opp_king_sq >= 0
-                    and may_give_check(state, from_sq, to_sq, flags, root_opp_king_sq, us)
-                    and gives_check(state, move)
-                ):
+                if reduction > 0 and may_check:
                     reduction -= 1
                 reduction = max(0, min(reduction, depth - 2))
                 if reduction > 0:
@@ -1002,78 +1004,6 @@ def search_root(
     )
 
     return best_score, best_move, runner_up_score, False
-
-
-@njit(cache=False)
-def iterative_deepening(
-    state: np.ndarray,
-    max_depth: int,
-    max_time_ms: int,
-    age: int,
-    hash_history: np.ndarray,
-    hist_len: int,
-    tt_hash: np.ndarray,
-    tt_score: np.ndarray,
-    tt_move: np.ndarray,
-    tt_depth: np.ndarray,
-    tt_bound: np.ndarray,
-    tt_age: np.ndarray,
-    tt_static_eval: np.ndarray,
-) -> tuple[int, int, int]:
-    best_move_overall = NO_MOVE
-    best_score_overall = 0
-
-    undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
-    moves_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
-    scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
-    killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
-    history = np.zeros((2, 64, 64), dtype=np.int32)
-
-    stats = np.zeros(13, dtype=np.int64)
-    start_ticks = clock()
-    stats[0] = 0
-    stats[1] = 0
-    stats[2] = start_ticks
-    if max_time_ms > 0:
-        stats[3] = start_ticks + int(max_time_ms * 1000)
-    else:
-        stats[3] = 0
-
-    for depth in range(1, max_depth + 1):
-        score, move, _, aborted = search_root(
-            state,
-            undo_stack,
-            moves_stack,
-            scores_stack,
-            -INF,
-            INF,
-            depth,
-            killers,
-            history,
-            stats,
-            hash_history,
-            hist_len,
-            age,
-            tt_hash,
-            tt_score,
-            tt_move,
-            tt_depth,
-            tt_bound,
-            tt_age,
-            tt_static_eval,
-        )
-
-        if aborted:
-            break
-
-        if move != NO_MOVE:
-            best_move_overall = move
-            best_score_overall = score
-
-        if abs(score) > MATE_THRESHOLD:
-            break
-
-    return best_move_overall, best_score_overall, int(stats[0])
 
 
 def board_to_state(board: "Board") -> np.ndarray:
