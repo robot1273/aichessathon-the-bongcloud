@@ -186,6 +186,19 @@ class TimeManager:
         )
         self._policy = f"{self.clock_band}+uncertain"
 
+    def shorten_for_singular_reply(self) -> None:
+        """Play essentially immediately when there's only one forcing reply."""
+        if not self._is_fixed_time:
+            self._soft_limit = min(
+                self._base_soft_limit * 0.1,
+                max(self.config.fixed_overhead_s, self._increment_s * 0.25)
+            )
+            self._hard_limit = min(
+                self._base_hard_limit * 0.2,
+                max(self.config.fixed_overhead_s * 2, self._increment_s * 0.5)
+            )
+            self._policy = f"{self.clock_band}+forcing"
+
     def shorten_for_stable_win(self) -> None:
         """Stop earlier when several completed iterations confirm a clear win."""
         if not self._is_fixed_time:
@@ -259,9 +272,13 @@ class TimeManager:
                 * (pressure_threshold - self._clock_left_s)
                 / pressure_threshold
             )
-        base = (usable / expected_remaining) + (
-            self._increment_s * self.config.increment_share
-        )
+        pure_base = usable / expected_remaining
+        dynamic_share = self.config.increment_share
+        # Dynamic increment factoring: as pure_base drops below increment_s, we rely more on the increment.
+        if self._increment_s > 0 and pure_base < self._increment_s:
+            dynamic_share = 1.0 - (1.0 - self.config.increment_share) * (pure_base / self._increment_s)
+        
+        base = pure_base + self._increment_s * dynamic_share
         if self.config.opening_first_move <= move_number <= self.config.opening_last_move:
             base *= self.config.opening_boost
         return base
