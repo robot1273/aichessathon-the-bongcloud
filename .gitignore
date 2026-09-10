@@ -4,3 +4,7 @@ __pycache__/
 .ruff_cache/
 submission.zip
 *.pgn
+# Fetched artifacts (see scripts/fetch_tables.py); packed via make zip --include
+tb/
+book/*.bin
+!book/.gitkeep

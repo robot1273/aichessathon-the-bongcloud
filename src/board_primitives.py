@@ -27,7 +27,11 @@ from src.evaluation import (
     GAMEPHASE_SUM,
     ISOLATED_PAWN_EG,
     ISOLATED_PAWN_MG,
+    MOP_CLOSE_EG,
+    MOP_EDGE_EG,
     PASSED_PAWN_MASKS,
+    ROOK_BEHIND_PASSER_EG,
+    ROOK_BEHIND_PASSER_MG,
     ROOK_OPEN_EG,
     ROOK_OPEN_MG,
     ROOK_SEMI_OPEN_EG,
@@ -229,15 +233,16 @@ def make_move(state: np.ndarray, undo_stack: np.ndarray, ply: int, move: int) ->
         state[HASH] ^= NB_CASTLING_TABLE[old_castling] ^ NB_CASTLING_TABLE[new_castling]
 
     # S3: refresh incremental structural bonuses only when pawn structure,
-    # bishop pair, or rook files could have changed (mirrors Board logic).
-    # Unmake restores via the undo-stack copy, so no work there.
+    # bishop pair, rook files, or mop-up terms (king squares, mating
+    # material) could have changed (mirrors Board logic). Unmake restores via
+    # the undo-stack copy, so no work there. Quiet knight/queen moves change
+    # nothing and skip both refreshes.
     if (
         moving_piece == PAWN
         or moving_piece == ROOK
         or moving_piece == BISHOP
-        or captured_piece == PAWN
-        or captured_piece == ROOK
-        or captured_piece == BISHOP
+        or moving_piece == KING
+        or captured_piece != -1
         or flags == KING_CASTLE
         or flags == QUEEN_CASTLE
         or flags == EN_PASSANT
@@ -245,9 +250,11 @@ def make_move(state: np.ndarray, undo_stack: np.ndarray, ply: int, move: int) ->
         _refresh_bonus(state, us)
         if (
             moving_piece == PAWN
-            or captured_piece == PAWN
-            or captured_piece == ROOK
-            or captured_piece == BISHOP
+            or moving_piece == ROOK
+            or moving_piece == KING
+            or captured_piece != -1
+            or flags == KING_CASTLE
+            or flags == QUEEN_CASTLE
             or flags == EN_PASSANT
         ):
             _refresh_bonus(state, them)
@@ -326,9 +333,13 @@ def is_in_check(state: np.ndarray) -> bool:
 
 @njit(cache=False)
 def _structural_bonus(state: np.ndarray, color: int) -> tuple[int, int]:
+    them = 1 - color
     own_pieces = state[C_WHITE + color]
+    them_pieces = state[C_WHITE + them]
     own_pawns = state[P_PAWN] & own_pieces
-    enemy_pawns = state[P_PAWN] & state[C_WHITE + (1 - color)]
+    enemy_pawns = state[P_PAWN] & them_pieces
+    own_rooks = state[P_ROOK] & own_pieces
+    enemy_rooks = state[P_ROOK] & them_pieces
     bishops = state[P_BISHOP] & own_pieces
 
     mg_bonus = 0
@@ -357,8 +368,19 @@ def _structural_bonus(state: np.ndarray, color: int) -> tuple[int, int]:
                 relative_rank = np.int64(7) - relative_rank
             mg_bonus += _PASSED_PAWN_MG_NP[relative_rank]
             eg_bonus += _PASSED_PAWN_EG_NP[relative_rank]
+            behind = (
+                FILE_MASKS[file_index]
+                & ~FORWARD_FILE_MASKS[color, square]
+                & ~(np.uint64(1) << np.uint64(square))
+            )
+            if own_rooks & behind:
+                mg_bonus += ROOK_BEHIND_PASSER_MG
+                eg_bonus += ROOK_BEHIND_PASSER_EG
+            if enemy_rooks & FORWARD_FILE_MASKS[color, square]:
+                mg_bonus -= ROOK_BEHIND_PASSER_MG
+                eg_bonus -= ROOK_BEHIND_PASSER_EG
 
-    rooks = state[P_ROOK] & own_pieces
+    rooks = own_rooks
     while rooks:
         rook = rooks & (~rooks + np.uint64(1))
         square = lsb_sq(rook)
@@ -371,6 +393,33 @@ def _structural_bonus(state: np.ndarray, color: int) -> tuple[int, int]:
             else:
                 mg_bonus += ROOK_OPEN_MG
                 eg_bonus += ROOK_OPEN_EG
+
+    # Mop-up (EG only): mating material vs a bare enemy king.
+    if not enemy_pawns:
+        opp_heavy = (state[P_QUEEN] | state[P_ROOK]) & them_pieces
+        opp_minors = (state[P_KNIGHT] | state[P_BISHOP]) & them_pieces
+        opp_bare = not opp_heavy and (not opp_minors or not (opp_minors & (opp_minors - 1)))
+        own_heavy = (state[P_QUEEN] | state[P_ROOK]) & own_pieces
+        if opp_bare and (own_heavy or (bishops and bishops & (bishops - np.uint64(1)))):
+            them_king = lsb_sq(state[P_KING] & them_pieces)
+            own_king = lsb_sq(state[P_KING] & own_pieces)
+            t_file = them_king & 7
+            t_rank = them_king >> 3
+            df = t_file - (own_king & 7)
+            if df < 0:
+                df = -df
+            dr = t_rank - (own_king >> 3)
+            if dr < 0:
+                dr = -dr
+            cheb = df if df > dr else dr
+            ef = 2 * t_file - 7
+            if ef < 0:
+                ef = -ef
+            er = 2 * t_rank - 7
+            if er < 0:
+                er = -er
+            edge = ef if ef > er else er
+            eg_bonus += edge * MOP_EDGE_EG + (14 - cheb) * MOP_CLOSE_EG
 
     return mg_bonus, eg_bonus
 

@@ -28,9 +28,13 @@ from src.evaluation import (
     GAMEPHASE_INC,
     GAMEPHASE_SUM,
     MG_TABLE,
+    MOP_CLOSE_EG,
+    MOP_EDGE_EG,
     PASSED_PAWN_EG,
     PASSED_PAWN_MASKS,
     PASSED_PAWN_MG,
+    ROOK_BEHIND_PASSER_EG,
+    ROOK_BEHIND_PASSER_MG,
 )
 from src.zobrist import (
     CASTLING_TABLE,
@@ -387,11 +391,12 @@ class Board:
     # -----------------------------------------------------------------------
 
     def _update_bonus(self, color: int) -> None:
-        """Compute pawn structure, bishop pair, and rook file bonuses for `color`."""
+        """Compute pawn structure, bishop pair, rook file and mop-up bonuses."""
         opp = 1 - color
         own_pawns = self.pieces[PAWN] & self.colours[color]
         opp_pawns = self.pieces[PAWN] & self.colours[opp]
         own_rooks = self.pieces[ROOK] & self.colours[color]
+        opp_rooks = self.pieces[ROOK] & self.colours[opp]
 
         mg = 20 if self.bishop_count[color] >= 2 else 0
         eg = 30 if self.bishop_count[color] >= 2 else 0
@@ -421,6 +426,18 @@ class Board:
             elif not (opp_pawns & passed_masks[sq]):
                 mg += passed_mg[sq]
                 eg += passed_eg[sq]
+                # Rook behind our passer, or enemy rook blockading ahead.
+                behind = (
+                    int(sq_file_mask[sq])
+                    & ~int(fwd_masks[sq])
+                    & (~(1 << sq) & 0xFFFFFFFFFFFFFFFF)
+                )
+                if own_rooks & behind:
+                    mg += ROOK_BEHIND_PASSER_MG
+                    eg += ROOK_BEHIND_PASSER_EG
+                if opp_rooks & fwd_masks[sq]:
+                    mg -= ROOK_BEHIND_PASSER_MG
+                    eg -= ROOK_BEHIND_PASSER_EG
 
         # Rooks on semi-open or open files
         bb = own_rooks
@@ -437,6 +454,23 @@ class Board:
                 else:
                     mg += 10
                     eg += 6
+
+        # Mop-up: with mating material vs a bare enemy king, drive it to the
+        # edge and close with our king (EG only; decides KQK/KRK-type endings
+        # the shallow search cannot otherwise convert efficiently).
+        if not opp_pawns:
+            opp_heavy = (self.pieces[QUEEN] | self.pieces[ROOK]) & self.colours[opp]
+            opp_minors = (self.pieces[KNIGHT] | self.pieces[BISHOP]) & self.colours[opp]
+            opp_bare = not opp_heavy and (
+                not opp_minors or (opp_minors & (opp_minors - 1)) == 0
+            )
+            own_heavy = (self.pieces[QUEEN] | self.pieces[ROOK]) & self.colours[color]
+            if opp_bare and (own_heavy or self.bishop_count[color] >= 2):
+                tk = self.king_sq[opp]
+                ck = self.king_sq[color]
+                edge = max(abs(2 * (tk & 7) - 7), abs(2 * (tk >> 3) - 7))
+                closeness = 14 - max(abs((ck & 7) - (tk & 7)), abs((ck >> 3) - (tk >> 3)))
+                eg += edge * MOP_EDGE_EG + closeness * MOP_CLOSE_EG
 
         self.mg_bonus[color] = mg
         self.eg_bonus[color] = eg
@@ -545,17 +579,19 @@ class Board:
             self.castling = new_castling
             self.hash ^= CASTLING_TABLE[old_castling] ^ CASTLING_TABLE[new_castling]
 
-        # Update bonus scores if pawns/rooks/bishops were involved
+        # Update bonus scores when structure, rook files, bishop pair, or
+        # mop-up terms (king squares, mating material) could have changed.
+        # Quiet knight/queen moves change nothing and skip both refreshes.
         if (
-            moving_piece in (PAWN, ROOK, BISHOP)
-            or captured_piece in (PAWN, ROOK, BISHOP)
+            moving_piece in (PAWN, ROOK, BISHOP, KING)
+            or captured_piece != -1
             or flags in (KING_CASTLE, QUEEN_CASTLE, EN_PASSANT)
         ):
             self._update_bonus(us)
             if (
-                moving_piece == PAWN
-                or captured_piece in (PAWN, ROOK, BISHOP)
-                or flags == EN_PASSANT
+                moving_piece in (PAWN, ROOK, KING)
+                or captured_piece != -1
+                or flags in (KING_CASTLE, QUEEN_CASTLE, EN_PASSANT)
             ):
                 self._update_bonus(them)
 

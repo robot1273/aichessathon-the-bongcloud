@@ -201,6 +201,13 @@ ROOK_OPEN_MG: Final[int] = 10
 ROOK_OPEN_EG: Final[int] = 6
 PASSED_PAWN_MG: Final[tuple[int, ...]] = (0, 0, 3, 7, 12, 20, 32, 0)
 PASSED_PAWN_EG: Final[tuple[int, ...]] = (0, 0, 6, 12, 22, 38, 65, 0)
+# Mop-up (EG only): drive a bare enemy king to the edge when we hold mating
+# material, and close with our king. Applied in all three eval paths.
+MOP_EDGE_EG: Final[int] = 10
+MOP_CLOSE_EG: Final[int] = 4
+# Rook supporting a passed pawn from behind, or blockading an enemy passer.
+ROOK_BEHIND_PASSER_MG: Final[int] = 10
+ROOK_BEHIND_PASSER_EG: Final[int] = 12
 _PASSED_PAWN_MG_NP: Final[np.ndarray] = np.array(PASSED_PAWN_MG, dtype=np.int16)
 _PASSED_PAWN_EG_NP: Final[np.ndarray] = np.array(PASSED_PAWN_EG, dtype=np.int16)
 
@@ -313,6 +320,8 @@ def _evaluate_kernel(
 
         own_pawns = pawns & occupancy
         enemy_pawns = pawns & occupancies[1 - color_index]
+        own_rooks = rooks & occupancy
+        enemy_rooks = rooks & occupancies[1 - color_index]
         mg_bonus = 0
         eg_bonus = 0
 
@@ -340,9 +349,20 @@ def _evaluate_kernel(
                     relative_rank = np.int64(7) - relative_rank
                 mg_bonus += _PASSED_PAWN_MG_NP[relative_rank]
                 eg_bonus += _PASSED_PAWN_EG_NP[relative_rank]
+                behind = (
+                    FILE_MASKS[file_index]
+                    & ~FORWARD_FILE_MASKS[color_index, square]
+                    & ~(np.uint64(1) << np.uint64(square))
+                )
+                if own_rooks & behind:
+                    mg_bonus += ROOK_BEHIND_PASSER_MG
+                    eg_bonus += ROOK_BEHIND_PASSER_EG
+                if enemy_rooks & FORWARD_FILE_MASKS[color_index, square]:
+                    mg_bonus -= ROOK_BEHIND_PASSER_MG
+                    eg_bonus -= ROOK_BEHIND_PASSER_EG
             bb ^= lsb
 
-        bb = rooks & occupancy
+        bb = own_rooks
         while bb != 0:
             lsb = bb & (np.uint64(0) - bb)
             square = _LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)]
@@ -355,6 +375,54 @@ def _evaluate_kernel(
                     mg_bonus += ROOK_OPEN_MG
                     eg_bonus += ROOK_OPEN_EG
             bb ^= lsb
+
+        # Mop-up (EG only): mating material vs a bare enemy king.
+        if enemy_pawns == 0:
+            them_occ = occupancies[1 - color_index]
+            opp_heavy = (queens | rooks) & them_occ
+            opp_minors = (knights | bishops) & them_occ
+            opp_bare = opp_heavy == 0 and (
+                opp_minors == 0 or (opp_minors & (opp_minors - np.uint64(1))) == 0
+            )
+            own_heavy = (queens | rooks) & occupancy
+            if opp_bare and (
+                own_heavy != 0
+                or (
+                    own_bishops != 0
+                    and own_bishops & (own_bishops - np.uint64(1)) != 0
+                )
+            ):
+                them_king_bb = kings & them_occ
+                own_king_bb = kings & occupancy
+                them_king = int(
+                    _LSB_INDEX[
+                        ((them_king_bb & (~them_king_bb + np.uint64(1))) * _DEBRUIJN64)
+                        >> np.uint64(58)
+                    ]
+                )
+                own_king = int(
+                    _LSB_INDEX[
+                        ((own_king_bb & (~own_king_bb + np.uint64(1))) * _DEBRUIJN64)
+                        >> np.uint64(58)
+                    ]
+                )
+                t_file = them_king & 7
+                t_rank = them_king >> 3
+                df = t_file - (own_king & 7)
+                if df < 0:
+                    df = -df
+                dr = t_rank - (own_king >> 3)
+                if dr < 0:
+                    dr = -dr
+                cheb = df if df > dr else dr
+                ef = 2 * t_file - 7
+                if ef < 0:
+                    ef = -ef
+                er = 2 * t_rank - 7
+                if er < 0:
+                    er = -er
+                edge = ef if ef > er else er
+                eg_bonus += edge * MOP_EDGE_EG + (14 - cheb) * MOP_CLOSE_EG
 
         if color_index == 0:
             mg_white += mg_bonus

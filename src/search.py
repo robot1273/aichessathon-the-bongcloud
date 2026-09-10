@@ -15,6 +15,7 @@ from src.search_numba import (
     board_to_state,
     search_root,
 )
+from src.tablebase import tb_root_move
 from src.time_manager import DEFAULT_TIME_CONFIG, TimeConfig, TimeManager
 from src.tt import create_tt_arrays, probe_tt
 
@@ -214,6 +215,28 @@ class Bot:
             self._record_selected_move(board, legal_moves[0])
             self._record_timing(1, None, 0.0, False, False, False, None, "forced-move")
             return legal_moves[0]
+
+        # Exact tablebase move (<=4 pieces, no castling). Instant and exact:
+        # won endings convert, lost endings resist, draws fall to search.
+        # Real-game mode only: fixed-depth callers (benchmarks, tests) measure
+        # the search itself, and the platform never passes depth.
+        if depth is None:
+            tb_move = tb_root_move(board, legal_moves, self._game_hashes)
+            if tb_move is not None:
+                self.best_move = tb_move
+                self.nodes = 1
+                self.completed_depth = 1
+                self.best_score = 0
+                self.runner_up_score = -INF
+                self.root_score_gap = None
+                self._record_selected_move(board, tb_move)
+                self._record_timing(1, None, 0.0, False, False, False, None, "tablebase")
+                return tb_move
+
+        # NOTE: a vendored Polyglot book (src/book.py) was A/B tested and
+        # removed: at 12s+0.5s it scored 62.5% over 12 games vs 75% without
+        # it (baseline 75% over 18). Our depth-12+ search outplays GM-popular
+        # variety picks, and time saved is worthless without time pressure.
 
         default_move = legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():

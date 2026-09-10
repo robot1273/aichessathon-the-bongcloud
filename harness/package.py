@@ -11,7 +11,7 @@ from harness.referee import FAILED_TERMINATIONS, play_match
 from harness.rules import BASE_MS, INCREMENT_MS, MAX_UNZIPPED_BYTES, OPENINGS, SMOKE_PLIES
 from harness.sandbox import local
 
-DEFAULT_INCLUDES = ("weights",)
+DEFAULT_INCLUDES = ("weights", "tb")
 SKIP = {"__pycache__", ".DS_Store"}
 HOUSE = Path(__file__).resolve().parent.parent / "baselines" / "random"
 
