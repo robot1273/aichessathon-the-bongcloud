@@ -104,15 +104,24 @@ def _pick_win(
                 return move
             if cb.is_stalemate() or cb.is_insufficient_material():
                 continue  # winning line never settles for less (search backup)
-            wdl = tb.get_wdl(cb)
+            try:
+                wdl = tb.get_wdl(cb)
+            except (KeyError, OSError, ValueError):
+                continue  # un-probeable continuation: skip, don't nuke loop
             if wdl == -2:
-                dtz = tb.get_dtz(cb)
+                try:
+                    dtz = tb.get_dtz(cb)
+                except (KeyError, OSError, ValueError):
+                    continue
                 if dtz is not None:
                     from_sq = move & 0x3F
                     zeroing = move_is_capture(move) or board.piece_at_sq[from_sq] == PAWN
                     tier_win.append((abs(dtz), move, zeroing))
             elif wdl == -1:
-                dtz = tb.get_dtz(cb)
+                try:
+                    dtz = tb.get_dtz(cb)
+                except (KeyError, OSError, ValueError):
+                    continue
                 if dtz is not None:
                     tier_cursed.append((abs(dtz), move))
         finally:
@@ -124,7 +133,7 @@ def _pick_win(
             continue  # would risk busting the fifty-move rule
         hashed = _result_hash(board, move)
         if hashed is not None and _repeats(hashed, game_hashes, 2):
-            continue  # would claim a draw by repetition while winning
+            continue  # never walk into a third repetition while winning
         return move
     for _, move in sorted(tier_cursed):
         hashed = _result_hash(board, move)
@@ -156,12 +165,18 @@ def _pick_loss(
                 return move  # mate for us even in a "lost" TB score
             if cb.is_stalemate() or cb.is_insufficient_material():
                 return move  # hold the draw
-            wdl = tb.get_wdl(cb)
+            try:
+                wdl = tb.get_wdl(cb)
+            except (KeyError, OSError, ValueError):
+                continue
             if wdl == 0 or wdl == -1:
                 # Opponent draws or is blessed-losing: take it immediately.
                 return move
             if wdl == 2:
-                dtz = tb.get_dtz(cb)
+                try:
+                    dtz = tb.get_dtz(cb)
+                except (KeyError, OSError, ValueError):
+                    continue
                 if dtz is not None and dtz > best_dtz:
                     best_dtz = dtz
                     best_move = move

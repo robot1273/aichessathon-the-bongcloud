@@ -68,10 +68,16 @@ _LSB_INDEX = np.array(
 
 @njit(cache=False)
 def lsb_sq(bb: int | np.uint64) -> int:
-    """Least significant bit index using 64-bit De Bruijn multiplication."""
+    """Least significant bit index using 64-bit De Bruijn multiplication.
+
+    Returns an explicitly signed int64: bare ``int(...)`` of the uint8 table
+    entry behaves as uint64 in Numba arithmetic (int64+uint64 promotes to
+    float64, and unsigned underflow never goes negative), which once
+    poisoned eval scores with -2**66 via the TT. See mop-up note below.
+    """
     u = np.uint64(bb)
     lsb = u & (np.uint64(0) - u)
-    return int(_LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)])
+    return np.int64(_LSB_INDEX[(lsb * _DEBRUIJN64) >> np.uint64(58)])  # type: ignore[return-value]
 
 
 @njit(cache=False)
@@ -401,6 +407,9 @@ def _structural_bonus(state: np.ndarray, color: int) -> tuple[int, int]:
         opp_bare = not opp_heavy and (not opp_minors or not (opp_minors & (opp_minors - 1)))
         own_heavy = (state[P_QUEEN] | state[P_ROOK]) & own_pieces
         if opp_bare and (own_heavy or (bishops and bishops & (bishops - np.uint64(1)))):
+            # NOTE: lsb_sq results behave as uint64 in Numba arithmetic
+            # (int64+uint64 promotes to float64, and unsigned underflow never
+            # goes negative), so cast to int64 before any arithmetic.
             them_king = lsb_sq(state[P_KING] & them_pieces)
             own_king = lsb_sq(state[P_KING] & own_pieces)
             t_file = them_king & 7
@@ -732,6 +741,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         if pieces_between != 0 and (pieces_between & (pieces_between - 1)) == 0:
             own_pinned = pieces_between & own_pieces
             if own_pinned:
+                # Cast: lsb_sq behaves as uint64; keep slots signed.
                 pinned_sq = lsb_sq(own_pinned)
                 pin_ray = between | (np.uint64(1) << np.uint64(pinner_sq))
                 if num_pins == 0:

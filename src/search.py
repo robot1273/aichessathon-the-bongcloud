@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 
 from src.board import Board, move_to_uci
-from src.book import book_move, make_rng
 from src.constants import INF, MATE_SCORE, MATE_THRESHOLD, MAX_PLY, NO_MOVE, STATE_SIZE
 from src.move_ordering import order_moves
 from src.search_numba import (
@@ -107,7 +106,6 @@ class Bot:
         increment_s: float = INCREMENT_S,
         time_config: TimeConfig = DEFAULT_TIME_CONFIG,
         trace_timing: bool = False,
-        use_book: bool = False,
         use_tb: bool = True,
     ) -> None:
         self.tt_exp_size = tt_exp_size
@@ -115,7 +113,6 @@ class Bot:
         self.increment_s = increment_s
         self.time_config = time_config
         self.trace_timing = trace_timing
-        self.use_book = use_book
         self.use_tb = use_tb
         self.current_age = 0
         self.tt_arrays = create_tt_arrays(tt_exp_size)
@@ -140,8 +137,6 @@ class Bot:
         self.last_timing: MoveTiming | None = None
         self._game_hashes: list[int] = []
         self._pending_position: Board | None = None
-        self._book_rng = make_rng()
-        self._book_out = False
 
         self._warmup_jit()
 
@@ -249,23 +244,6 @@ class Bot:
             elif tb_wdl == 2:
                 tb_win_pending = True
 
-        # Opening book (vendored master-game statistics, opt-in via use_book:
-        # A/B showed GM-popular variety picks cost Elo vs our search at
-        # 12s+0.05s). Instant while in book; out permanently after first miss.
-        if depth is None and self.use_book and not self._book_out:
-            book_hit = book_move(board, legal_moves, self._book_rng)
-            if book_hit is not None:
-                self.best_move = book_hit
-                self.nodes = 1
-                self.completed_depth = 1
-                self.best_score = 0
-                self.runner_up_score = -INF
-                self.root_score_gap = None
-                self._record_selected_move(board, book_hit)
-                self._record_timing(1, None, 0.0, False, False, False, None, "book")
-                return book_hit
-            self._book_out = True
-
         default_move = legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
             self.best_move = default_move
@@ -316,6 +294,7 @@ class Bot:
         self.stats[1] = 0  # aborted flag
         self.stats[2] = clock()
         self.stats[3] = deadline_ticks
+        self.stats[4:] = 0  # telemetry counters (S7); nodes/abort above
 
         # Clear killer heuristics per search; age history
         self.killers.fill(0)
@@ -580,14 +559,33 @@ class Bot:
                 stop_reason = "mate"
                 break
 
-        # TB-win fallback: search found no mate, so convert exactly. Keeps
-        # the fast search mate when there is one, guarantees conversion
-        # otherwise (also covers repetition-blindness and hard-limit aborts).
-        if tb_win_pending and abs(best_score) <= MATE_THRESHOLD and best_move != NO_MOVE:
-            dtz_move = tb_win_move(board, legal_moves, self._game_hashes)
-            if dtz_move is not None and dtz_move != best_move:
-                best_move = dtz_move
-                stop_reason = "tablebase"
+        # TB-win endgame: trust the search's technique (it sees mates and
+        # winning plans), with exact DTZ as the safety net. Pure-DTZ play
+        # wanders (it minimizes to the next zeroing, not to mate) and
+        # alternating the two salads draws won endings. DTZ takes over when
+        # the search is blind (sub-200 score in a TB win), aborted, or about
+        # to repeat a position (shuffling draws won KBNK-type endings while
+        # DTZ triangulates correctly); real mates always stand.
+        if tb_win_pending and best_move != NO_MOVE:
+            search_mated = abs(best_score) > MATE_THRESHOLD
+            search_blind = aborted_depth is not None or abs(best_score) < 200
+            if not search_mated and not search_blind:
+                tmp = board.copy()
+                try:
+                    tmp.make_move(best_move)
+                    # Veto only the fatal case (third occurrence = instant
+                    # draw claim). Lighter triangulation repeats must stand:
+                    # vetoing those broke KBNK conversions by forcing DTZ at
+                    # exactly the wrong moments.
+                    search_repeats = self._game_hashes.count(tmp.hash) >= 2
+                except (ValueError, IndexError):
+                    search_repeats = False
+                search_blind = search_repeats
+            if not search_mated and search_blind:
+                dtz_move = tb_win_move(board, legal_moves, self._game_hashes)
+                if dtz_move is not None:
+                    best_move = dtz_move
+                    stop_reason = "tablebase"
 
         self.best_move = best_move
         self.best_score = best_score

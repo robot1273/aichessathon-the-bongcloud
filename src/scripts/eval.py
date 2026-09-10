@@ -103,7 +103,6 @@ class AdaptiveEvaluator:
         trace_timing: bool = False,
         require_positive_root_gap: bool = False,
         aspiration_retry_reserve: float = 2.0,
-        use_book: bool = False,
         use_tb: bool = True,
     ) -> None:
         self.stockfish_path = stockfish_path
@@ -114,7 +113,6 @@ class AdaptiveEvaluator:
         self.trace_timing = trace_timing
         self.require_positive_root_gap = require_positive_root_gap
         self.aspiration_retry_reserve = aspiration_retry_reserve
-        self.use_book = use_book
         self.use_tb = use_tb
 
     def run_benchmark(
@@ -122,6 +120,7 @@ class AdaptiveEvaluator:
         total_games: int = 12,
         adapt_skill: bool = True,
         workers: int = 1,
+        start_fens: list[str] | None = None,
     ) -> EvalStats:
         if workers < 1:
             raise ValueError("workers must be positive")
@@ -132,7 +131,7 @@ class AdaptiveEvaluator:
         print(
             f"Time Control: {self.base_time_ms}ms + {self.inc_ms}ms inc "
             f"| Adaptive Skill: {adapt_skill} | Workers: {workers} "
-            f"| Book: {self.use_book} | TB: {self.use_tb}"
+            f"| TB: {self.use_tb}"
         )
         print("=" * 65)
 
@@ -163,7 +162,8 @@ class AdaptiveEvaluator:
         for game_idx in range(1, total_games + 1):
             # Alternate colors every game
             bot_color = chess.WHITE if game_idx % 2 != 0 else chess.BLACK
-            res = self._play_game(game_idx, bot_color)
+            start_fen = start_fens[(game_idx - 1) % len(start_fens)] if start_fens else None
+            res = self._play_game(game_idx, bot_color, start_fen)
             stats.add_result(res)
 
             if adapt_skill:
@@ -197,8 +197,10 @@ class AdaptiveEvaluator:
             f"Violations: {res.time_violations}"
         )
 
-    def _play_game(self, game_id: int, bot_color: chess.Color) -> GameResult:
-        board = chess.Board()
+    def _play_game(
+        self, game_id: int, bot_color: chess.Color, start_fen: str | None = None
+    ) -> GameResult:
+        board = chess.Board(start_fen) if start_fen else chess.Board()
         time_config = replace(
             DEFAULT_TIME_CONFIG,
             require_positive_root_gap=self.require_positive_root_gap,
@@ -208,7 +210,6 @@ class AdaptiveEvaluator:
             increment_s=self.inc_ms / 1000,
             time_config=time_config,
             trace_timing=self.trace_timing,
-            use_book=self.use_book,
             use_tb=self.use_tb,
         )
 
@@ -442,11 +443,6 @@ def main() -> None:
         help="Predicted-iteration multiples reserved before aspiration",
     )
     parser.add_argument(
-        "--book",
-        action="store_true",
-        help="Enable vendored Polyglot opening book",
-    )
-    parser.add_argument(
         "--no-tb",
         action="store_true",
         help="Disable Syzygy tablebase probing",
@@ -463,7 +459,6 @@ def main() -> None:
         trace_timing=args.trace_timing,
         require_positive_root_gap=args.positive_root_gap,
         aspiration_retry_reserve=args.aspiration_reserve,
-        use_book=args.book,
         use_tb=not args.no_tb,
     )
 
