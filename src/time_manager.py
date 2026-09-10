@@ -12,22 +12,22 @@ class TimeConfig:
     safety_s: float = 1.0
     fixed_overhead_s: float = 0.002
     fixed_soft_ratio: float = 0.80
-    low_clock_increments: float = 20.0
+    low_clock_increments: float = 40.0
     panic_clock_increments: float = 6.0
     low_clock_floor_s: float = 1.0
     panic_clock_floor_s: float = 0.25
 
-    expected_moves_base: float = 28.0
-    expected_moves_phase: float = 17.0
-    pressure_moves: float = 12.0
+    expected_moves_base: float = 40.0
+    expected_moves_phase: float = 45.0
+    pressure_moves: float = 30.0
     increment_share: float = 0.80
     opening_first_move: int = 5
     opening_last_move: int = 25
     opening_boost: float = 1.20
 
-    soft_usable_cap: float = 0.20
+    soft_usable_cap: float = 0.15
     hard_base_ratio: float = 3.0
-    hard_usable_cap: float = 0.40
+    hard_usable_cap: float = 0.25
     panic_soft_increment: float = 0.65
     panic_hard_increment: float = 0.95
     panic_soft_floor_s: float = 0.010
