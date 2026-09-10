@@ -10,7 +10,7 @@ from src.board import Board, move_to_uci
 from src.board import make_move as encode_move
 from src.constants import HASH, INF, MAX_PLY, STATE_SIZE
 from src.evaluation import evaluate_with_phase
-from src.search import Bot, is_root_ambiguous
+from src.search import STATS_SIZE, Bot, is_root_ambiguous
 from src.search_numba import alpha_beta, board_to_state, is_draw, quiescence
 from src.time_manager import DEFAULT_TIME_CONFIG
 from src.tt import create_tt_arrays, probe_tt
@@ -83,7 +83,7 @@ class SearchTests(unittest.TestCase):
         undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
         moves_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
         scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
-        stats = np.zeros(4, dtype=np.int64)
+        stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         score = quiescence(
             state, undo_stack, moves_stack, scores_stack, -INF, INF, 0, stats
@@ -97,7 +97,7 @@ class SearchTests(unittest.TestCase):
         undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
         moves_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
         scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
-        stats = np.zeros(4, dtype=np.int64)
+        stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         score = quiescence(
             state, undo_stack, moves_stack, scores_stack, -INF, INF, 0, stats
@@ -128,7 +128,7 @@ class SearchTests(unittest.TestCase):
         undo_stack = np.zeros((MAX_PLY, STATE_SIZE), dtype=np.uint64)
         moves_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
         scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
-        stats = np.zeros(4, dtype=np.int64)
+        stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         board_primitives.make_null_move(state, undo_stack, 0)
         board_primitives.make_move(state, undo_stack, 1, encode_move(63, 55))
@@ -156,7 +156,7 @@ class SearchTests(unittest.TestCase):
         history = np.zeros((2, 64, 64), dtype=np.int32)
         hash_history = np.zeros(MAX_PLY, dtype=np.uint64)
         tt_arrays = create_tt_arrays(10)
-        stats = np.zeros(4, dtype=np.int64)
+        stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         first_score = alpha_beta(
             state,

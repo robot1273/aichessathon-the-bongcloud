@@ -25,6 +25,23 @@ clock.restype = ctypes.c_long
 clock.argtypes = []
 
 
+STATS_NODES = 0
+STATS_ABORTED = 1
+STATS_T0 = 2
+STATS_DEADLINE = 3
+STATS_QNODES = 4
+STATS_TT_PROBES = 5
+STATS_TT_HITS = 6
+STATS_TT_CUTOFFS = 7
+STATS_BETA_CUTOFFS = 8
+STATS_RFP_PRUNES = 9
+STATS_NULL_PRUNES = 10
+STATS_FUTILITY_PRUNES = 11
+STATS_LMR = 12
+STATS_SIZE = 13
+
+
+@dataclass
 class SearchStats:
     nodes: int = 0
     qnodes: int = 0
@@ -83,7 +100,7 @@ def is_root_ambiguous(root_gap: int | None, config: TimeConfig) -> bool:
 class Bot:
     def __init__(
         self,
-        tt_exp_size: int = 22,
+        tt_exp_size: int = 20,
         collect_stats: bool = False,
         increment_s: float = INCREMENT_S,
         time_config: TimeConfig = DEFAULT_TIME_CONFIG,
@@ -104,7 +121,7 @@ class Bot:
         self.scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
         self.killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
         self.history = np.zeros((2, 64, 64), dtype=np.int32)
-        self.stats = np.zeros(4, dtype=np.int64)
+        self.stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         self.completed_depth = 0
         self.sel_depth = 0
@@ -123,8 +140,21 @@ class Bot:
     def _warmup_jit(self) -> None:
         """Warm up the JIT compiler with a dummy search."""
         board = Board.from_fen()
+        # Warm the Python-board attack path (bishop/rook magic lookups with
+        # scalar signatures) so the first real move pays ~20us, not ~40-150ms
+        # of lazy Numba compilation on clock. See B1 baseline.
+        board.generate_moves()
+        board.is_in_check()
+        board.evaluate()
+        ep_board = Board.from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq e3 0 1"
+        )
+        ep_board.generate_moves()
         state = board_to_state(board)
         hash_history = np.zeros(MAX_PLY, dtype=np.uint64)
+        # S5: depth 1 suffices — Numba compiles whole reachable call graph on
+        # first call regardless of branch depth (NMP/futility/LMR need no
+        # execution for compilation). Depth 3 only burned search time.
         search_root(
             state,
             self.undo_stack,
@@ -132,7 +162,7 @@ class Bot:
             self.scores_stack,
             -100,
             100,
-            3,
+            1,
             self.killers,
             self.history,
             self.stats,
@@ -506,6 +536,23 @@ class Bot:
         self.completed_depth = completed_depth
         self.sel_depth = completed_depth
         self.nodes = int(self.stats[0])
+        if self.collect_stats:
+            st = self.stats
+            self.search_stats = SearchStats(
+                nodes=int(st[STATS_NODES]),
+                qnodes=int(st[STATS_QNODES]),
+                move_generations=int(st[STATS_NODES]),
+                tt_probes=int(st[STATS_TT_PROBES]),
+                tt_hits=int(st[STATS_TT_HITS]),
+                tt_cutoffs=int(st[STATS_TT_CUTOFFS]),
+                beta_cutoffs=int(st[STATS_BETA_CUTOFFS]),
+                rfp_prunes=int(st[STATS_RFP_PRUNES]),
+                futility_prunes=int(st[STATS_FUTILITY_PRUNES]),
+                null_prunes=int(st[STATS_NULL_PRUNES]),
+                lmr_reductions=int(st[STATS_LMR]),
+            )
+        else:
+            self.search_stats = None
         self._record_selected_move(board, best_move)
         self._record_timing(
             completed_depth,
@@ -551,20 +598,13 @@ class Bot:
             print(self.last_timing.format())
 
     def _record_position(self, board: Board) -> None:
-        if self._pending_position is None:
-            self._game_hashes = [board.hash]
-            return
-
-        candidate = self._pending_position.copy()
-        for move in candidate.generate_moves():
-            candidate.make_move(move)
-            if candidate.hash == board.hash:
-                self._game_hashes.append(board.hash)
-                return
-            candidate.unmake_move()
-
-        self._game_hashes = [board.hash]
-        self._pending_position = None
+        # Hash-only repetition tracking (B2): the old candidate.copy() +
+        # generate_moves() + make/unmake loop cost ~200-300us per move to
+        # rediscover the opponent reply we already know is legal (referee
+        # enforces legality). Board.hash is repetition-safe, so O(1) append
+        # is equivalent and never triggers lazy JIT on clock.
+        if not self._game_hashes or self._game_hashes[-1] != board.hash:
+            self._game_hashes.append(board.hash)
 
     def _record_selected_move(self, board: Board, move: int) -> None:
         if move == NO_MOVE:

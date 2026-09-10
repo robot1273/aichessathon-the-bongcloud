@@ -228,6 +228,30 @@ def make_move(state: np.ndarray, undo_stack: np.ndarray, ply: int, move: int) ->
         state[CASTLING] = new_castling
         state[HASH] ^= NB_CASTLING_TABLE[old_castling] ^ NB_CASTLING_TABLE[new_castling]
 
+    # S3: refresh incremental structural bonuses only when pawn structure,
+    # bishop pair, or rook files could have changed (mirrors Board logic).
+    # Unmake restores via the undo-stack copy, so no work there.
+    if (
+        moving_piece == PAWN
+        or moving_piece == ROOK
+        or moving_piece == BISHOP
+        or captured_piece == PAWN
+        or captured_piece == ROOK
+        or captured_piece == BISHOP
+        or flags == KING_CASTLE
+        or flags == QUEEN_CASTLE
+        or flags == EN_PASSANT
+    ):
+        _refresh_bonus(state, us)
+        if (
+            moving_piece == PAWN
+            or captured_piece == PAWN
+            or captured_piece == ROOK
+            or captured_piece == BISHOP
+            or flags == EN_PASSANT
+        ):
+            _refresh_bonus(state, them)
+
     state[TURN] = them
     state[HASH] ^= NB_TURN_KEY
 
@@ -355,24 +379,32 @@ def _structural_bonus(state: np.ndarray, color: int) -> tuple[int, int]:
 def evaluate(state: np.ndarray) -> int:
     us = int(state[TURN])
     them = 1 - us
-    us_mg_bonus, us_eg_bonus = _structural_bonus(state, us)
-    them_mg_bonus, them_eg_bonus = _structural_bonus(state, them)
+    # S3: structural bonuses maintained incrementally in make_move; pure
+    # arithmetic here (no pawn/rook scans). Slots wrap-uint64 like PST scores.
     mg = (
         np.int64(state[MG_SCORE_W + us])
-        + us_mg_bonus
+        + np.int64(state[MG_BONUS_W + us])
         - np.int64(state[MG_SCORE_W + them])
-        - them_mg_bonus
+        - np.int64(state[MG_BONUS_W + them])
     )
     eg = (
         np.int64(state[EG_SCORE_W + us])
-        + us_eg_bonus
+        + np.int64(state[EG_BONUS_W + us])
         - np.int64(state[EG_SCORE_W + them])
-        - them_eg_bonus
+        - np.int64(state[EG_BONUS_W + them])
     )
     phase = min(int(state[GAME_PHASE]), GAMEPHASE_SUM)
     eg_phase = GAMEPHASE_SUM - phase
     score = mg * phase + eg * eg_phase
     return int(score // GAMEPHASE_SUM if score >= 0 else -((-score) // GAMEPHASE_SUM))
+
+
+@njit(cache=False)
+def _refresh_bonus(state: np.ndarray, color: int) -> None:
+    """Recompute and store one side's structural bonus (S3)."""
+    mg, eg = _structural_bonus(state, color)
+    state[MG_BONUS_W + color] = np.uint64(np.int64(mg))
+    state[EG_BONUS_W + color] = np.uint64(np.int64(eg))
 
 
 @njit(cache=False)
@@ -449,9 +481,103 @@ def gives_check(state: np.ndarray, move: int) -> bool:
 
 
 @njit(cache=False)
+def _aligned(a: int, b: int) -> bool:
+    """Same rank, file, or diagonal (necessary condition for slider contact)."""
+    dr = (a >> 3) - (b >> 3)
+    df = (a & 7) - (b & 7)
+    return dr == 0 or df == 0 or dr == df or dr == -df
+
+
+@njit(cache=False)
+def may_give_check(
+    state: np.ndarray,
+    from_sq: int,
+    to_sq: int,
+    flags: int,
+    opp_king_sq: int,
+    us: int,
+) -> bool:
+    """Cheap necessary condition for check (S2 gate before raycasts).
+
+    Returns False only when no direct or discovered check is geometrically
+    possible, letting futility/LMR skip the up-to-4-raycast gives_check().
+    Conservative: castling and promotions always return True.
+    """
+    if flags == KING_CASTLE or flags == QUEEN_CASTLE:
+        return True
+    if flags >= KNIGHT_PROMO:
+        return True
+
+    king_mask = np.uint64(1) << np.uint64(opp_king_sq)
+    pt = piece_type_at(state, from_sq)
+    if pt == PAWN:
+        if NB_PAWN_ATTACKS[us, to_sq] & king_mask:
+            return True
+    elif pt == KNIGHT:
+        if NB_KNIGHT_ATTACKS[to_sq] & king_mask:
+            return True
+    elif pt == KING:
+        pass
+    elif _aligned(to_sq, opp_king_sq):
+        return True
+
+    if _aligned(from_sq, opp_king_sq):
+        return True
+    if flags == EN_PASSANT:
+        ep_cap_sq = to_sq - 8 if us == WHITE else to_sq + 8
+        if _aligned(ep_cap_sq, opp_king_sq):
+            return True
+    return False
+
+
+@njit(cache=False)
 def _push_move(moves: np.ndarray, count: int, m: int) -> int:
     moves[count] = m
     return count + 1
+
+
+@njit(cache=False)
+def _lookup_pin_mask(
+    from_sq: int,
+    s0: int,
+    m0: np.uint64,
+    s1: int,
+    m1: np.uint64,
+    s2: int,
+    m2: np.uint64,
+    s3: int,
+    m3: np.uint64,
+    s4: int,
+    m4: np.uint64,
+    s5: int,
+    m5: np.uint64,
+    s6: int,
+    m6: np.uint64,
+    s7: int,
+    m7: np.uint64,
+) -> np.uint64:
+    """Pin-ray mask for a pinned square (S1: stack scalars, no heap alloc).
+
+    At most 8 pins can exist (one per king ray), so 8 slots are exhaustive.
+    Callers only invoke this when the pinned bit is set.
+    """
+    if s0 == from_sq:
+        return m0
+    if s1 == from_sq:
+        return m1
+    if s2 == from_sq:
+        return m2
+    if s3 == from_sq:
+        return m3
+    if s4 == from_sq:
+        return m4
+    if s5 == from_sq:
+        return m5
+    if s6 == from_sq:
+        return m6
+    if s7 == from_sq:
+        return m7
+    return np.uint64(0xFFFFFFFFFFFFFFFF)
 
 
 @njit(cache=False)
@@ -523,7 +649,26 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
     else:
         check_mask = np.uint64(0xFFFFFFFFFFFFFFFF)
 
-    pin_mask = np.empty(64, dtype=np.uint64)
+    # S1: pin storage as stack scalars (8 king rays = provable max pins).
+    # Replaces pin_mask = np.empty(64) heap alloc per node (NRT pressure at
+    # ~2M nodes/s). Lookup via _lookup_pin_mask only on pinned pieces (rare).
+    pin_s0 = -1
+    pin_s1 = -1
+    pin_s2 = -1
+    pin_s3 = -1
+    pin_s4 = -1
+    pin_s5 = -1
+    pin_s6 = -1
+    pin_s7 = -1
+    pin_m0 = np.uint64(0)
+    pin_m1 = np.uint64(0)
+    pin_m2 = np.uint64(0)
+    pin_m3 = np.uint64(0)
+    pin_m4 = np.uint64(0)
+    pin_m5 = np.uint64(0)
+    pin_m6 = np.uint64(0)
+    pin_m7 = np.uint64(0)
+    num_pins = 0
     pinned_pieces = np.uint64(0)
 
     pinners = (bishop_attacks(king_sq, other_pieces) & opp_diag) | (
@@ -539,7 +684,32 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
             own_pinned = pieces_between & own_pieces
             if own_pinned:
                 pinned_sq = lsb_sq(own_pinned)
-                pin_mask[pinned_sq] = between | (np.uint64(1) << np.uint64(pinner_sq))
+                pin_ray = between | (np.uint64(1) << np.uint64(pinner_sq))
+                if num_pins == 0:
+                    pin_s0 = pinned_sq
+                    pin_m0 = pin_ray
+                elif num_pins == 1:
+                    pin_s1 = pinned_sq
+                    pin_m1 = pin_ray
+                elif num_pins == 2:
+                    pin_s2 = pinned_sq
+                    pin_m2 = pin_ray
+                elif num_pins == 3:
+                    pin_s3 = pinned_sq
+                    pin_m3 = pin_ray
+                elif num_pins == 4:
+                    pin_s4 = pinned_sq
+                    pin_m4 = pin_ray
+                elif num_pins == 5:
+                    pin_s5 = pinned_sq
+                    pin_m5 = pin_ray
+                elif num_pins == 6:
+                    pin_s6 = pinned_sq
+                    pin_m6 = pin_ray
+                elif num_pins == 7:
+                    pin_s7 = pinned_sq
+                    pin_m7 = pin_ray
+                num_pins += 1
                 pinned_pieces |= own_pinned
 
     active_own = own_pieces
@@ -557,7 +727,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
 
         target_mask = movable_mask
         if pinned_pieces & lsb:
-            target_mask &= pin_mask[from_sq]
+            target_mask &= _lookup_pin_mask(from_sq, pin_s0, pin_m0, pin_s1, pin_m1, pin_s2, pin_m2, pin_s3, pin_m3, pin_s4, pin_m4, pin_s5, pin_m5, pin_s6, pin_m6, pin_s7, pin_m7)
         file = from_sq & 7
         rank = from_sq >> 3
 
@@ -699,7 +869,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         knights &= knights - np.uint64(1)
         target_mask = movable_mask
         if pinned_pieces & lsb:
-            target_mask &= pin_mask[from_sq]
+            target_mask &= _lookup_pin_mask(from_sq, pin_s0, pin_m0, pin_s1, pin_m1, pin_s2, pin_m2, pin_s3, pin_m3, pin_s4, pin_m4, pin_s5, pin_m5, pin_s6, pin_m6, pin_s7, pin_m7)
         targets = NB_KNIGHT_ATTACKS[from_sq] & target_mask & (
             other_pieces if captures_only else ~own_pieces
         )
@@ -718,7 +888,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         bishops &= bishops - np.uint64(1)
         target_mask = movable_mask
         if pinned_pieces & lsb:
-            target_mask &= pin_mask[from_sq]
+            target_mask &= _lookup_pin_mask(from_sq, pin_s0, pin_m0, pin_s1, pin_m1, pin_s2, pin_m2, pin_s3, pin_m3, pin_s4, pin_m4, pin_s5, pin_m5, pin_s6, pin_m6, pin_s7, pin_m7)
         targets = bishop_attacks(from_sq, occupied) & target_mask & (
             other_pieces if captures_only else ~own_pieces
         )
@@ -737,7 +907,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         rooks &= rooks - np.uint64(1)
         target_mask = movable_mask
         if pinned_pieces & lsb:
-            target_mask &= pin_mask[from_sq]
+            target_mask &= _lookup_pin_mask(from_sq, pin_s0, pin_m0, pin_s1, pin_m1, pin_s2, pin_m2, pin_s3, pin_m3, pin_s4, pin_m4, pin_s5, pin_m5, pin_s6, pin_m6, pin_s7, pin_m7)
         targets = rook_attacks(from_sq, occupied) & target_mask & (
             other_pieces if captures_only else ~own_pieces
         )
@@ -756,7 +926,7 @@ def generate_moves(state: np.ndarray, moves: np.ndarray, captures_only: bool = F
         queens &= queens - np.uint64(1)
         target_mask = movable_mask
         if pinned_pieces & lsb:
-            target_mask &= pin_mask[from_sq]
+            target_mask &= _lookup_pin_mask(from_sq, pin_s0, pin_m0, pin_s1, pin_m1, pin_s2, pin_m2, pin_s3, pin_m3, pin_s4, pin_m4, pin_s5, pin_m5, pin_s6, pin_m6, pin_s7, pin_m7)
         targets = queen_attacks(from_sq, occupied) & target_mask & (
             other_pieces if captures_only else ~own_pieces
         )

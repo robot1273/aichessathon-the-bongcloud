@@ -52,7 +52,7 @@ PROMOTION_CAPTURE_PIECES = (
 )
 
 # ---------------------------------------------------------------------------
-# State Array Indices (Size: 25 uint64)
+# State Array Indices (Size: 23 uint64)
 # ---------------------------------------------------------------------------
 # The board state is represented as a single numpy array of dtype=uint64.
 # This avoids Python object overhead and enables Numba JIT compilation.
@@ -82,7 +82,16 @@ EG_SCORE_B: Final[int] = 16
 GAME_PHASE: Final[int] = 17
 NULL_SEARCH: Final[int] = 18
 
-STATE_SIZE: Final[int] = 19
+# S3: incrementally maintained structural bonuses (pawn structure, bishop
+# pair, rook files). Updated in make_move only when pawns/rooks/bishops move
+# or are captured (mirroring Board._update_bonus conditions); read by
+# evaluate() as pure arithmetic. Stored wrapped-uint64 like the PST scores.
+MG_BONUS_W: Final[int] = 19
+MG_BONUS_B: Final[int] = 20
+EG_BONUS_W: Final[int] = 21
+EG_BONUS_B: Final[int] = 22
+
+STATE_SIZE: Final[int] = 23
 
 # ---------------------------------------------------------------------------
 # Zobrist, Castling, and Move Helpers
