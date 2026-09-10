@@ -1,6 +1,7 @@
 import random
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import chess.polyglot
 import numpy as np
@@ -79,6 +80,25 @@ class SearchTests(unittest.TestCase):
         assert bot.last_timing is not None
         self.assertEqual(bot.last_timing.completed_depth, 2)
         self.assertEqual(bot.last_timing.root_gap, bot.root_score_gap)
+
+    def test_opening_move_requires_stable_search_confirmation(self) -> None:
+        bot = Bot(use_tb=False)
+        board = Board.from_fen()
+        opening_move = next(
+            move for move in board.generate_moves() if move_to_uci(move) == "e2e4"
+        )
+
+        with (
+            patch("src.search.book_move", return_value=opening_move),
+            patch.object(Bot, "_search_root", return_value=(20, opening_move, -100, False)),
+        ):
+            move = bot.get_best_move(board, time_left_ms=100_000)
+
+        self.assertEqual(move, opening_move)
+        self.assertEqual(bot.completed_depth, 8)
+        self.assertIsNotNone(bot.last_timing)
+        assert bot.last_timing is not None
+        self.assertEqual(bot.last_timing.stop_reason, "opening-book")
 
     def test_checkmate_takes_precedence_over_halfmove_draw(self) -> None:
         bot = Bot()

@@ -13,6 +13,7 @@ from src.board import Board, move_to_uci
 from src.constants import INF, MATE_SCORE, MATE_THRESHOLD, MAX_PLY, NO_MOVE, STATE_SIZE
 from src.evaluation import GAMEPHASE_SUM
 from src.move_ordering import pick_fallback_move
+from src.opening_book import book_move, initialize_opening_book
 from src.search_numba import (
     board_to_state,
     search_root,
@@ -59,6 +60,8 @@ class SearchStats:
 
 
 INCREMENT_S = 0.5
+BOOK_CONFIRM_DEPTH = 8
+BOOK_CONFIRM_ITERATIONS = 2
 
 
 class SearchInfo(TypedDict):
@@ -119,11 +122,13 @@ class Bot:
         increment_s: float = INCREMENT_S,
         time_config: TimeConfig = DEFAULT_TIME_CONFIG,
         trace_timing: bool = False,
+        use_book: bool = True,
         use_tb: bool = True,
     ) -> None:
         self.collect_stats = collect_stats
         self.time_config = time_config
         self.trace_timing = trace_timing
+        self.use_book = use_book
         self.use_tb = use_tb
         self.current_age = 0
         self.tt_arrays = create_tt_arrays(tt_exp_size)
@@ -147,6 +152,8 @@ class Bot:
         self.last_timing: MoveTiming | None = None
         self._game_hashes: list[int] = []
 
+        if self.use_book:
+            initialize_opening_book()
         if self.use_tb:
             initialize_tablebase()
         self._warmup_jit()
@@ -225,7 +232,13 @@ class Bot:
                     board, tb_root.fallback_move, 1, 1, "tablebase"
                 )
 
-        default_move = legal_moves[0]
+        # Tablebases are exact and take precedence in the unlikely event that
+        # an early sparse position is also present in the opening book.
+        opening_move = None
+        if depth is None and self.use_book and tb_root is None:
+            opening_move = book_move(board, legal_moves)
+
+        default_move = opening_move if opening_move is not None else legal_moves[0]
         if (depth is None or movetime_ms is not None) and self.time_mgr.is_time_up():
             return self._finish_without_search(board, default_move, 0, 0, "request-deadline")
 
@@ -237,7 +250,7 @@ class Bot:
         default_move = pick_fallback_move(
             board,
             legal_moves,
-            tt_move=tt_move_val if found else NO_MOVE,
+            tt_move=tt_move_val if found else opening_move or NO_MOVE,
         )
 
         state = board_to_state(board)
@@ -425,6 +438,16 @@ class Bot:
                 stable_iterations += 1
             else:
                 stable_iterations = 1
+
+            if (
+                opening_move is not None
+                and d >= BOOK_CONFIRM_DEPTH
+                and best_move == opening_move
+                and stable_iterations >= BOOK_CONFIRM_ITERATIONS
+                and not last_root_ambiguous
+            ):
+                stop_reason = "opening-book"
+                break
 
             if (
                 best_score >= self.time_config.stable_win_score

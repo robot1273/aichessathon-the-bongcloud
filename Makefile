@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup play arena zip gate test profile_nps profile eval tables
+.PHONY: setup play arena zip gate test profile_nps profile eval tables book
 
 setup:
 	uv sync
@@ -14,7 +14,10 @@ arena:
 tables:
 	uv run python scripts/fetch_tables.py
 
-zip: tables
+book:
+	uv run python scripts/fetch_book.py
+
+zip: tables book
 	uv run python -m harness.package
 
 gate:
@@ -34,5 +37,5 @@ profile_nps:
 profile:
 	uv run python -m src.scripts.profile_funcs $(if $(DEPTH),--depth "$(DEPTH)") $(if $(TIME),--time "$(TIME)") $(if $(TOP),--top "$(TOP)") $(if $(SORT),--sort "$(SORT)") $(if $(POS),--position "$(POS)") $(if $(FEN),--fen "$(FEN)") $(if $(QUIET),--quiet)
 
-eval: tables
-	uv run python -m src.scripts.eval $(if $(GAMES),--games "$(GAMES)") $(if $(BASE_MS),--base-time "$(BASE_MS)") $(if $(INC_MS),--inc "$(INC_MS)") $(if $(SKILL),--skill "$(SKILL)") $(if $(STATIC),--static-skill) $(if $(WORKERS),--workers "$(WORKERS)") $(if $(TRACE_TIMING),--trace-timing) $(if $(POSITIVE_ROOT_GAP),--positive-root-gap) $(if $(ASPIRATION_RESERVE),--aspiration-reserve "$(ASPIRATION_RESERVE)")
+eval: tables book
+	uv run python -m src.scripts.eval $(if $(GAMES),--games "$(GAMES)") $(if $(BASE_MS),--base-time "$(BASE_MS)") $(if $(INC_MS),--inc "$(INC_MS)") $(if $(SKILL),--skill "$(SKILL)") $(if $(STATIC),--static-skill) $(if $(WORKERS),--workers "$(WORKERS)") $(if $(TRACE_TIMING),--trace-timing) $(if $(POSITIVE_ROOT_GAP),--positive-root-gap) $(if $(ASPIRATION_RESERVE),--aspiration-reserve "$(ASPIRATION_RESERVE)") $(if $(NO_BOOK),--no-book)

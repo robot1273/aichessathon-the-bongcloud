@@ -103,6 +103,7 @@ class AdaptiveEvaluator:
         trace_timing: bool = False,
         require_positive_root_gap: bool = True,
         aspiration_retry_reserve: float = 2.0,
+        use_book: bool = True,
         use_tb: bool = True,
     ) -> None:
         self.stockfish_path = stockfish_path
@@ -113,6 +114,7 @@ class AdaptiveEvaluator:
         self.trace_timing = trace_timing
         self.require_positive_root_gap = require_positive_root_gap
         self.aspiration_retry_reserve = aspiration_retry_reserve
+        self.use_book = use_book
         self.use_tb = use_tb
 
     def run_benchmark(
@@ -131,7 +133,7 @@ class AdaptiveEvaluator:
         print(
             f"Time Control: {self.base_time_ms}ms + {self.inc_ms}ms inc "
             f"| Adaptive Skill: {adapt_skill} | Workers: {workers} "
-            f"| TB: {self.use_tb}"
+            f"| Book: {self.use_book} | TB: {self.use_tb}"
         )
         print("=" * 65)
 
@@ -210,6 +212,7 @@ class AdaptiveEvaluator:
             increment_s=self.inc_ms / 1000,
             time_config=time_config,
             trace_timing=self.trace_timing,
+            use_book=self.use_book,
             use_tb=self.use_tb,
         )
 
@@ -444,6 +447,11 @@ def main() -> None:
         help="Predicted-iteration multiples reserved before aspiration",
     )
     parser.add_argument(
+        "--no-book",
+        action="store_true",
+        help="Disable Polyglot opening-book probing",
+    )
+    parser.add_argument(
         "--no-tb",
         action="store_true",
         help="Disable Syzygy tablebase probing",
@@ -460,6 +468,7 @@ def main() -> None:
         trace_timing=args.trace_timing,
         require_positive_root_gap=args.positive_root_gap,
         aspiration_retry_reserve=args.aspiration_reserve,
+        use_book=not args.no_book,
         use_tb=not args.no_tb,
     )
 

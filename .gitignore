@@ -4,5 +4,7 @@ __pycache__/
 .ruff_cache/
 submission.zip
 *.pgn
-# Fetched artifacts (see scripts/fetch_tables.py); packed via make zip
+# Fetched artifacts (see scripts/fetch_tables.py and scripts/fetch_book.py)
+# are packed by make zip.
 tb/
+book/
