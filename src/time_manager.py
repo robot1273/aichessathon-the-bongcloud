@@ -57,7 +57,6 @@ class TimeConfig:
     root_uncertainty_gap: int = 50
     require_positive_root_gap: bool = True
     prediction_min_depth: int = 5
-    panic_max_depth: int = 2
     aspiration_min_depth: int = 5
     aspiration_delta: int = 30
     aspiration_retry_reserve: float = 2.0

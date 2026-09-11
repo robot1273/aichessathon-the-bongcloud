@@ -140,6 +140,7 @@ class Bot:
         self.scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
         self.killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
         self.history = np.zeros((2, 64, 64), dtype=np.int32)
+        self.countermoves = np.zeros((64, 64), dtype=np.int32)
         self.stats = np.zeros(STATS_SIZE, dtype=np.int64)
 
         self.completed_depth = 0
@@ -186,6 +187,7 @@ class Bot:
             1,
             self.killers,
             self.history,
+            self.countermoves,
             self.stats,
             hash_history,
             0,
@@ -196,6 +198,7 @@ class Bot:
             array.fill(0)
         self.killers.fill(0)
         self.history.fill(0)
+        self.countermoves.fill(0)
         self.stats.fill(0)
 
     def get_best_move(
@@ -310,14 +313,6 @@ class Bot:
         for d in range(1, max_d + 1):
             if d > 1 and depth is None and self.time_mgr.should_stop_iterating():
                 stop_reason = "soft-limit"
-                break
-
-            if (
-                d > self.time_config.panic_max_depth
-                and depth is None
-                and self.time_mgr.is_panic_clock()
-            ):
-                stop_reason = "panic-depth"
                 break
 
             predicted_time = 0.0
@@ -561,6 +556,7 @@ class Bot:
             depth,
             self.killers,
             self.history,
+            self.countermoves,
             self.stats,
             hash_history,
             hist_len,

@@ -9,17 +9,31 @@ import numpy as np
 from src import board_primitives
 from src.board import Board, move_to_uci
 from src.board import make_move as encode_move
-from src.constants import HASH, INF, MAX_PLY, STATE_SIZE
+from src.constants import HASH, INF, MAX_PLY, NO_MOVE, STATE_SIZE
 from src.evaluation import evaluate_with_phase
 from src.move_ordering import pick_fallback_move
 from src.search import STATS_SIZE, Bot, is_root_ambiguous
-from src.search_numba import alpha_beta, board_to_state, is_draw, quiescence
+from src.search_numba import alpha_beta, board_to_state, is_draw, quiescence, score_move
 from src.time_manager import DEFAULT_TIME_CONFIG
 from src.tt import create_tt_arrays, probe_tt
 from src.zobrist import calculate_hash, has_legal_en_passant
 
 
 class SearchTests(unittest.TestCase):
+    def test_countermove_orders_quiet_response_after_killers(self) -> None:
+        board = Board.from_fen()
+        move = next(move for move in board.generate_moves() if move_to_uci(move) == "e2e4")
+        state = board_to_state(board)
+        killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
+        history = np.zeros((2, 64, 64), dtype=np.int32)
+
+        self.assertEqual(
+            score_move(state, move, NO_MOVE, move, 0, killers, history),
+            600_000_000,
+        )
+        killers[0, 1] = move
+        self.assertEqual(score_move(state, move, NO_MOVE, move, 0, killers, history), 700_000_000)
+
     def test_fallback_prefers_queen_promotion_or_valid_tt_move(self) -> None:
         board = Board.from_fen("k7/4P3/8/8/8/8/8/K7 w - - 0 1")
         moves = board.generate_moves()
@@ -80,6 +94,23 @@ class SearchTests(unittest.TestCase):
         assert bot.last_timing is not None
         self.assertEqual(bot.last_timing.completed_depth, 2)
         self.assertEqual(bot.last_timing.root_gap, bot.root_score_gap)
+
+    def test_panic_clock_uses_allocated_search_time(self) -> None:
+        config = replace(
+            DEFAULT_TIME_CONFIG,
+            panic_soft_increment=0.05,
+            panic_hard_increment=0.08,
+            panic_soft_floor_s=0.025,
+            panic_hard_floor_s=0.04,
+        )
+        bot = Bot(time_config=config, use_book=False, use_tb=False)
+
+        bot.get_best_move(Board.from_fen(), time_left_ms=3_000)
+
+        self.assertGreater(bot.completed_depth, 2)
+        self.assertIsNotNone(bot.last_timing)
+        assert bot.last_timing is not None
+        self.assertNotEqual(bot.last_timing.stop_reason, "panic-depth")
 
     def test_opening_move_requires_stable_search_confirmation(self) -> None:
         bot = Bot(use_tb=False)
@@ -186,6 +217,7 @@ class SearchTests(unittest.TestCase):
         scores_stack = np.zeros((MAX_PLY, 256), dtype=np.int32)
         killers = np.zeros((MAX_PLY, 2), dtype=np.int32)
         history = np.zeros((2, 64, 64), dtype=np.int32)
+        countermoves = np.zeros((64, 64), dtype=np.int32)
         hash_history = np.zeros(MAX_PLY, dtype=np.uint64)
         tt_arrays = create_tt_arrays(10)
         stats = np.zeros(STATS_SIZE, dtype=np.int64)
@@ -200,8 +232,10 @@ class SearchTests(unittest.TestCase):
             1,
             1,
             True,
+            NO_MOVE,
             killers,
             history,
+            countermoves,
             stats,
             hash_history,
             0,
@@ -223,8 +257,10 @@ class SearchTests(unittest.TestCase):
             2,
             1,
             True,
+            NO_MOVE,
             killers,
             history,
+            countermoves,
             stats,
             hash_history,
             0,

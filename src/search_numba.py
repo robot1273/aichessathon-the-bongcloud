@@ -152,6 +152,7 @@ def score_move(
     state: np.ndarray,
     move: int,
     tt_move: int,
+    counter_move: int,
     ply: int,
     killers: np.ndarray,
     history: np.ndarray,
@@ -175,6 +176,8 @@ def score_move(
         return 800000000
     if move == killers[ply, 1]:
         return 700000000
+    if move == counter_move:
+        return 600000000
 
     us = int(state[TURN])
     return int(history[us, from_sq, to_sq])
@@ -323,8 +326,10 @@ def alpha_beta(
     depth: int,
     ply: int,
     null_move_allowed: bool,
+    previous_move: int,
     killers: np.ndarray,
     history: np.ndarray,
+    countermoves: np.ndarray,
     stats: np.ndarray,
     hash_history: np.ndarray,
     hist_len: int,
@@ -442,8 +447,10 @@ def alpha_beta(
             depth - 1 - r,
             ply + 1,
             False,
+            NO_MOVE,
             killers,
             history,
+            countermoves,
             stats,
             hash_history,
             hist_len,
@@ -469,8 +476,13 @@ def alpha_beta(
     moves = moves_stack[ply]
     num_moves = generate_moves(state, moves, captures_only=False)
     scores = scores_stack[ply]
+    counter_move = NO_MOVE
+    if previous_move != NO_MOVE:
+        counter_move = countermoves[previous_move & 0x3F, (previous_move >> 6) & 0x3F]
     for i in range(num_moves):
-        scores[i] = score_move(state, moves[i], tt_move_val, ply, killers, history)
+        scores[i] = score_move(
+            state, moves[i], tt_move_val, counter_move, ply, killers, history
+        )
 
     best_move = NO_MOVE
     best_score = -INF
@@ -488,6 +500,29 @@ def alpha_beta(
         flags = (move >> 12) & 0xF
 
         is_tactical = bool(flags & CAPTURE or flags >= KNIGHT_PROMO)
+        move_gives_check = False
+        needs_check_test = (
+            (
+                not is_pv
+                and not in_check
+                and depth <= 3
+                and legal_moves > 0
+                and not is_tactical
+                and static_eval + 120 * depth <= alpha
+            )
+            or (
+                depth >= 3
+                and legal_moves + 1 >= 4
+                and not is_tactical
+                and not in_check
+            )
+        )
+        if (
+            needs_check_test
+            and opp_king_sq >= 0
+            and may_give_check(state, from_sq, to_sq, flags, opp_king_sq, us)
+        ):
+            move_gives_check = gives_check(state, move)
 
         # Futility Pruning: verify arithmetic margin before expensive raycast
         # S2: may_give_check gate (coordinate/table pre-filter) avoids the
@@ -499,11 +534,7 @@ def alpha_beta(
             and legal_moves > 0
             and not is_tactical
             and (static_eval + 120 * depth <= alpha)
-            and opp_king_sq >= 0
-            and not (
-                may_give_check(state, from_sq, to_sq, flags, opp_king_sq, us)
-                and gives_check(state, move)
-            )
+            and not move_gives_check
         ):
             stats[11] += 1
             continue
@@ -522,8 +553,10 @@ def alpha_beta(
                 depth - 1,
                 ply + 1,
                 True,
+                move,
                 killers,
                 history,
+                countermoves,
                 stats,
                 hash_history,
                 hist_len,
@@ -553,13 +586,7 @@ def alpha_beta(
                     reduction -= 1
                 elif h < -4000:
                     reduction += 1
-                # S2 gate: skip raycasts unless geometrically possible.
-                if (
-                    reduction > 0
-                    and opp_king_sq >= 0
-                    and may_give_check(state, from_sq, to_sq, flags, opp_king_sq, us)
-                    and gives_check(state, move)
-                ):
+                if reduction > 0 and move_gives_check:
                     reduction -= 1
                 reduction = max(0, min(reduction, depth - 2))
                 if reduction > 0:
@@ -575,8 +602,10 @@ def alpha_beta(
                 depth - 1 - reduction,
                 ply + 1,
                 True,
+                move,
                 killers,
                 history,
+                countermoves,
                 stats,
                 hash_history,
                 hist_len,
@@ -602,8 +631,10 @@ def alpha_beta(
                     depth - 1,
                     ply + 1,
                     True,
+                    move,
                     killers,
                     history,
+                    countermoves,
                     stats,
                     hash_history,
                     hist_len,
@@ -629,8 +660,10 @@ def alpha_beta(
                     depth - 1,
                     ply + 1,
                     True,
+                    move,
                     killers,
                     history,
+                    countermoves,
                     stats,
                     hash_history,
                     hist_len,
@@ -662,6 +695,10 @@ def alpha_beta(
                         if killers[ply, 0] != move:
                             killers[ply, 1] = killers[ply, 0]
                             killers[ply, 0] = move
+                        if previous_move != NO_MOVE:
+                            countermoves[
+                                previous_move & 0x3F, (previous_move >> 6) & 0x3F
+                            ] = move
                         # History gravity on beta-cutoff
                         bonus = min(depth * depth, 400)
                         cur = history[us, from_sq, to_sq]
@@ -734,6 +771,7 @@ def search_root(
     depth: int,
     killers: np.ndarray,
     history: np.ndarray,
+    countermoves: np.ndarray,
     stats: np.ndarray,
     hash_history: np.ndarray,
     hist_len: int,
@@ -770,7 +808,7 @@ def search_root(
     num_moves = generate_moves(state, moves, captures_only=False)
     scores = scores_stack[0]
     for i in range(num_moves):
-        scores[i] = score_move(state, moves[i], tt_move_val, 0, killers, history)
+        scores[i] = score_move(state, moves[i], tt_move_val, NO_MOVE, 0, killers, history)
 
     best_move = NO_MOVE
     best_score = -INF
@@ -814,8 +852,10 @@ def search_root(
                 depth - 1,
                 1,
                 True,
+                move,
                 killers,
                 history,
+                countermoves,
                 stats,
                 hash_history,
                 hist_len,
@@ -859,8 +899,10 @@ def search_root(
                 depth - 1 - reduction,
                 1,
                 True,
+                move,
                 killers,
                 history,
+                countermoves,
                 stats,
                 hash_history,
                 hist_len,
@@ -886,8 +928,10 @@ def search_root(
                     depth - 1,
                     1,
                     True,
+                    move,
                     killers,
                     history,
+                    countermoves,
                     stats,
                     hash_history,
                     hist_len,
@@ -913,8 +957,10 @@ def search_root(
                     depth - 1,
                     1,
                     True,
+                    move,
                     killers,
                     history,
+                    countermoves,
                     stats,
                     hash_history,
                     hist_len,
